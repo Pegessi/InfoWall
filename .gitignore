@@ -1,0 +1,22 @@
+# Build artifacts
+/bin/
+/infowall
+/web/dist/
+/cmd/infowall/dist/
+*.tsbuildinfo
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Dependencies
+/web/node_modules/
+
+# Logs and local noise
+*.log
+.DS_Store
+
+# Editor / OS
+.idea/
+.vscode/

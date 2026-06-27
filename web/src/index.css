@@ -1,0 +1,240 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco,
+    Consolas, "Liberation Mono", "Courier New", monospace;
+  --radius-card: 0.75rem;
+
+  --color-background: hsl(var(--background-hsl));
+  --color-foreground: hsl(var(--foreground-hsl));
+  --color-card: hsl(var(--card-hsl));
+  --color-card-foreground: hsl(var(--card-foreground-hsl));
+  --color-border: hsl(var(--border-hsl));
+  --color-muted: hsl(var(--muted-hsl));
+  --color-muted-foreground: hsl(var(--muted-foreground-hsl));
+  --color-subtle: hsl(var(--subtle-hsl));
+  --color-accent: hsl(var(--accent-hsl));
+  --color-accent-foreground: hsl(var(--accent-foreground-hsl));
+  --color-positive: hsl(var(--positive-hsl));
+  --color-negative: hsl(var(--negative-hsl));
+  --color-ring: hsl(var(--ring-hsl));
+}
+
+:root {
+  --background-hsl: 0 0% 100%;
+  --foreground-hsl: 240 10% 3.9%;
+  --card-hsl: 0 0% 100%;
+  --card-foreground-hsl: 240 10% 3.9%;
+  --border-hsl: 240 5.9% 90%;
+  --muted-hsl: 240 4.8% 95.9%;
+  --muted-foreground-hsl: 240 3.8% 46.1%;
+  --subtle-hsl: 240 4% 92%;
+  --accent-hsl: 221 83% 53%;
+  --accent-foreground-hsl: 0 0% 100%;
+  --positive-hsl: 142 71% 45%;
+  --negative-hsl: 0 72% 51%;
+  --ring-hsl: 240 5% 65%;
+}
+
+.dark {
+  --background-hsl: 0 0% 4%;
+  --foreground-hsl: 0 0% 98%;
+  --card-hsl: 0 0% 9%;
+  --card-foreground-hsl: 0 0% 98%;
+  --border-hsl: 0 0% 18%;
+  --muted-hsl: 0 0% 12%;
+  --muted-foreground-hsl: 240 5% 64.9%;
+  --subtle-hsl: 0 0% 15%;
+  --accent-hsl: 217 91% 60%;
+  --accent-foreground-hsl: 0 0% 100%;
+  --positive-hsl: 142 71% 45%;
+  --negative-hsl: 0 84% 60%;
+  --ring-hsl: 0 0% 32%;
+}
+
+/* Expose the original HSL triples for inline hsl() usage with optional alpha */
+:root {
+  --background: var(--background-hsl);
+  --foreground: var(--foreground-hsl);
+  --card: var(--card-hsl);
+  --card-foreground: var(--card-foreground-hsl);
+  --border: var(--border-hsl);
+  --muted: var(--muted-hsl);
+  --muted-foreground: var(--muted-foreground-hsl);
+  --subtle: var(--subtle-hsl);
+  --accent: var(--accent-hsl);
+  --accent-foreground: var(--accent-foreground-hsl);
+  --positive: var(--positive-hsl);
+  --negative: var(--negative-hsl);
+  --ring: var(--ring-hsl);
+}
+
+html {
+  font-size: 14px;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.prose-infowall {
+  max-width: none;
+  font-size: 0.95rem;
+  line-height: 1.65;
+  color: hsl(var(--foreground));
+}
+.prose-infowall strong {
+  font-weight: 600;
+  color: hsl(var(--foreground));
+}
+.prose-infowall em {
+  font-style: italic;
+}
+.prose-infowall p {
+  margin: 0.5rem 0;
+}
+.prose-infowall p:first-child {
+  margin-top: 0;
+}
+.prose-infowall p:last-child {
+  margin-bottom: 0;
+}
+.prose-infowall a {
+  font-weight: 400;
+  color: hsl(var(--accent));
+  text-decoration: none;
+}
+.prose-infowall a:hover {
+  text-decoration: underline;
+}
+.prose-infowall h1, .prose-infowall h2, .prose-infowall h3, .prose-infowall h4 {
+  color: hsl(var(--foreground));
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.prose-infowall h1 { font-size: 1.25rem; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+.prose-infowall h2 { font-size: 1.125rem; margin-top: 1.25rem; margin-bottom: 0.5rem; }
+.prose-infowall h3 { font-size: 1rem; margin-top: 1rem; margin-bottom: 0.5rem; }
+.prose-infowall h4 { font-size: 0.875rem; margin-top: 0.75rem; margin-bottom: 0.25rem; }
+.prose-infowall ul {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+  list-style-type: disc;
+}
+.prose-infowall ol {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
+  list-style-type: decimal;
+}
+.prose-infowall li {
+  margin: 0.125rem 0;
+}
+.prose-infowall li::marker {
+  color: hsl(var(--muted-foreground));
+}
+.prose-infowall :not(pre) > code {
+  border-radius: 0.25rem;
+  background-color: hsl(var(--muted));
+  padding: 0.125rem 0.375rem;
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  color: hsl(var(--foreground));
+}
+.prose-infowall pre {
+  margin: 0.75rem 0;
+  border-radius: 0.5rem;
+  border: 1px solid hsl(var(--border));
+  background-color: hsl(var(--muted));
+  padding: 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  line-height: 1.6;
+  overflow-x: auto;
+}
+.prose-infowall pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+.prose-infowall blockquote {
+  margin: 0.75rem 0;
+  border-left: 2px solid hsl(var(--border));
+  padding-left: 1rem;
+  color: hsl(var(--muted-foreground));
+  font-style: normal;
+}
+.prose-infowall blockquote p {
+  margin: 0.25rem 0;
+}
+.prose-infowall img {
+  margin: 0.75rem 0;
+  border-radius: 0.5rem;
+}
+.prose-infowall hr {
+  margin: 1rem 0;
+  border-color: hsl(var(--border));
+}
+.prose-infowall table {
+  margin: 0.75rem 0;
+  width: 100%;
+  font-size: 0.875rem;
+  border-collapse: collapse;
+}
+.prose-infowall th {
+  border-bottom: 1px solid hsl(var(--border));
+  padding: 0.375rem 0.75rem;
+  text-align: left;
+  font-weight: 500;
+}
+.prose-infowall td {
+  border-bottom: 1px solid hsl(var(--border));
+  padding: 0.375rem 0.75rem;
+}
+
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.animate-fade-up {
+  animation: fadeUp 200ms ease-out both;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background-color: hsl(var(--muted-foreground) / 0.3);
+  border-radius: 9999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: hsl(var(--muted-foreground) / 0.5);
+}
