@@ -89,7 +89,7 @@ directly to the default branch, and use conventional commit messages
 ```text
 infowall/
 ├── cmd/infowall/        CLI entry point + //go:embed of the built frontend
-│   ├── main.go          subcommands: serve / push / list / pin / unpin / delete / version
+│   ├── main.go          subcommands: serve / push / list / get / pin / unpin / delete / version
 │   ├── dist_prod.go     //go:build !dev — embeds cmd/infowall/dist
 │   └── dist_dev.go      //go:build dev  — no embed (serves via Vite proxy)
 ├── internal/
@@ -197,6 +197,13 @@ git-ignored — do not commit them.
   all four together.
 - **Frontend lint is type-check only**: `npm run lint` runs `tsc --noEmit`;
   there is no ESLint. Don't assume style auto-fixing — keep code clean manually.
+- **CLI is agent-friendly by contract**: every server-talking subcommand
+  supports `--json` (results on stdout, `{"error":...}` on stderr) and exits
+  non-zero on any failure; `push` accepts one or more files and/or `-`/stdin
+  (directory arguments are rejected — expand folders with a shell glob) and
+  never prompts when given arguments. Keep new subcommands consistent —
+  register shared flags via `addClientFlags` and route output through the
+  `clientConfig` helpers in `cmd/infowall/main.go`.
 
 ## Working Logs
 
