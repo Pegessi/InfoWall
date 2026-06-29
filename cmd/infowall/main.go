@@ -2,21 +2,27 @@
 // Subcommands:
 //
 //	serve     start the HTTP + SSE server
-//	push      push a markdown item (from file, stdin, or heredoc)
+//	push      push one or more markdown items (from files, stdin, or heredoc)
 //	list      list recent items
+//	get       fetch a single item by id
 //	pin/unpin toggle the pinned flag on an item
 //	delete    delete an item
 //	version   print version info
+//
+// The push, list, get, pin, unpin, and delete commands all accept --json for
+// machine-readable output, making the CLI suitable for scripting and agents.
 package main
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -32,7 +38,11 @@ var (
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		// errEmitted means the message was already written (e.g. as JSON); just exit.
+		var emitted errEmitted
+		if !errors.As(err, &emitted) {
+			fmt.Fprintln(os.Stderr, "error:", err)
+		}
 		os.Exit(1)
 	}
 }
@@ -52,16 +62,12 @@ func run(args []string) error {
 		return cmdPush(rest)
 	case "list":
 		return cmdList(rest)
+	case "get":
+		return cmdGet(rest)
 	case "pin":
-		if len(rest) < 1 {
-			return fmt.Errorf("usage: infowall pin <id>")
-		}
-		return cmdPin(rest[0], true)
+		return cmdPin(rest, true)
 	case "unpin":
-		if len(rest) < 1 {
-			return fmt.Errorf("usage: infowall unpin <id>")
-		}
-		return cmdPin(rest[0], false)
+		return cmdPin(rest, false)
 	case "delete":
 		return cmdDelete(rest)
 	case "version", "--version", "-v":
@@ -81,23 +87,32 @@ func printUsage() {
 
 Usage:
   infowall serve   [--addr :8899] [--db infowall.db] [--dev] [--api-key KEY]
-  infowall push    [file|-] [-t/--type TYPE] [--server URL] [--api-key KEY] [--pin]
-  infowall list    [--limit N] [--type TYPE] [--json]
-  infowall pin     <id>
-  infowall unpin   <id>
-  infowall delete  <id> [--yes]
+  infowall push    [file|- ...] [-t/--topic TOPIC] [--type TYPE] [--pin] [--server URL] [--api-key KEY] [--json]
+  infowall list    [--limit N] [--topic TOPIC] [--type TYPE] [--server URL] [--api-key KEY] [--json]
+  infowall get     <id> [--raw] [--server URL] [--api-key KEY] [--json]
+  infowall pin     <id> [--server URL] [--api-key KEY] [--json]
+  infowall unpin   <id> [--server URL] [--api-key KEY] [--json]
+  infowall delete  <id> [--yes] [--server URL] [--api-key KEY] [--json]
   infowall version
 
 Examples:
-  infowall push paper.md
-  echo "# done" | infowall push -
-  cat <<'EOF' | infowall push -
-  ---
-  type: paper
-  title: Attention Is All You Need
-  ---
-  The dominant sequence transduction models...
-  EOF`)
+  infowall push paper.md                    # push one file
+  infowall push notes/*.md                   # push every *.md via a shell glob
+  infowall push a.md b.md c.md               # push several files as separate items
+  echo "# done" | infowall push -            # push from stdin
+  infowall push - --topic link < link.md      # set the topic explicitly
+  infowall push docs/*.md --json             # machine-readable result array
+  infowall list --topic paper                 # filter a topic panel
+  infowall list --json | jq '.items[].id'     # script-friendly output
+  infowall get 1a2b3c4d --json               # fetch one item as JSON
+
+Agent-friendly notes:
+  * Every command supports --json for structured stdout; on failure a JSON
+    object {"error": "..."} is written to stderr and the exit code is non-zero.
+  * push is fully non-interactive when given file arguments, so it never
+    blocks waiting for input. Use it to upload complex markdown from files
+    instead of squeezing content onto the command line. Push whole folders
+    with a shell glob (e.g. notes/*.md); directory arguments are rejected.`)
 }
 
 // --- serve ---
@@ -128,68 +143,80 @@ func cmdServe(args []string) error {
 
 func cmdPush(args []string) error {
 	fs := flag.NewFlagSet("push", flag.ExitOnError)
-	typ := fs.String("type", "", "override/set item type (e.g. note, paper)")
-	serverURL := fs.String("server", envOr("INFOWALL_URL", "http://localhost:8899"), "server base URL")
-	apiKey := fs.String("api-key", os.Getenv("INFOWALL_API_KEY"), "API key")
+	typ := fs.String("type", "", "compatibility alias for --topic")
+	topic := fs.String("topic", "", "override/set item topic (e.g. note, paper)")
+	forceTopic := fs.String("t", "", "shorthand for --topic")
 	pin := fs.Bool("pin", false, "push as pinned")
-	forceType := fs.String("t", "", "shorthand for --type")
-	fs.Parse(args)
-	if *forceType != "" {
-		*typ = *forceType
+	cfg := addClientFlags(fs)
+	parseFlags(fs, args)
+	if *topic != "" {
+		*typ = *topic
+	}
+	if *forceTopic != "" {
+		*typ = *forceTopic
 	}
 
-	file := "-"
-	fileGiven := false
-	if rest := fs.Args(); len(rest) > 0 {
-		file = rest[0]
-		fileGiven = true
-	}
-
-	raw, err := readInput(file, fileGiven)
+	sources, err := expandSources(fs.Args())
 	if err != nil {
-		return err
+		return cfg.fail(err)
 	}
 
-	// If --type is set and the input does not start with a frontmatter fence,
-	// wrap it with a synthetic frontmatter block.
-	trimmed := bytes.TrimLeft(raw, " \t\r\n")
-	hasFM := bytes.HasPrefix(trimmed, []byte("---"))
-	if *typ != "" || *pin {
-		if !hasFM {
-			var fm bytes.Buffer
-			fm.WriteString("---\n")
-			if *typ != "" {
-				fmt.Fprintf(&fm, "type: %s\n", *typ)
+	results := make([]pushResult, 0, len(sources))
+	var failures int
+	for _, src := range sources {
+		res := pushOne(src, *typ, *pin, cfg)
+		if res.Error != "" {
+			failures++
+		}
+		results = append(results, res)
+	}
+
+	if cfg.asJSON {
+		// A single source still returns an array for predictable shape.
+		writeJSONStdout(results)
+	} else {
+		for _, r := range results {
+			if r.Error != "" {
+				fmt.Fprintf(os.Stderr, "✗ %s: %s\n", r.Source, r.Error)
+				continue
 			}
-			if *pin {
-				fm.WriteString("pinned: true\n")
-			}
-			fm.WriteString("---\n\n")
-			raw = append(fm.Bytes(), raw...)
-		} else {
-			// Inject type/pinned into existing frontmatter (simple text manipulation, not full YAML parse).
-			raw = injectIntoFrontmatter(raw, *typ, *pin)
+			fmt.Printf("pushed %s (%s) %q  ← %s\n", shortID(r.ID), r.Type, r.Title, r.Source)
 		}
 	}
 
-	url := strings.TrimRight(*serverURL, "/") + "/api/items"
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
-	if err != nil {
-		return err
+	if failures > 0 {
+		return errEmitted{fmt.Errorf("%d of %d source(s) failed", failures, len(results))}
 	}
-	req.Header.Set("Content-Type", "text/markdown; charset=utf-8")
-	if *apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+*apiKey)
-	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	return nil
+}
+
+// pushResult is the per-source outcome of a batch push, suitable for JSON output.
+type pushResult struct {
+	Source string `json:"source"`
+	ID     string `json:"id,omitempty"`
+	Type   string `json:"type,omitempty"`
+	Title  string `json:"title,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+// pushOne reads, prepares, and uploads a single markdown source. It never returns
+// an error; failures are captured in the result so a batch can continue.
+func pushOne(src source, typ string, pin bool, cfg *clientConfig) pushResult {
+	raw, err := src.read()
 	if err != nil {
-		return err
+		return pushResult{Source: src.label, Error: err.Error()}
+	}
+	raw = applyFrontmatter(raw, typ, pin)
+
+	url := cfg.url("/api/items")
+	resp, err := cfg.do(http.MethodPost, url, "text/markdown; charset=utf-8", bytes.NewReader(raw))
+	if err != nil {
+		return pushResult{Source: src.label, Error: err.Error()}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("push failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return pushResult{Source: src.label, Error: fmt.Sprintf("server %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))}
 	}
 	var created struct {
 		ID    string `json:"id"`
@@ -197,14 +224,32 @@ func cmdPush(args []string) error {
 		Title string `json:"title"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
-		return err
+		return pushResult{Source: src.label, Error: fmt.Sprintf("decode response: %v", err)}
 	}
-	shortID := created.ID
-	if len(shortID) > 8 {
-		shortID = shortID[:8]
+	return pushResult{Source: src.label, ID: created.ID, Type: created.Type, Title: created.Title}
+}
+
+// applyFrontmatter injects topic/pinned into the markdown when requested. If the
+// document already begins with a frontmatter fence the fields are merged in,
+// otherwise a minimal frontmatter block is prepended.
+func applyFrontmatter(raw []byte, typ string, pin bool) []byte {
+	if typ == "" && !pin {
+		return raw
 	}
-	fmt.Printf("pushed %s (%s) %q\n", shortID, created.Type, created.Title)
-	return nil
+	trimmed := bytes.TrimLeft(raw, " \t\r\n")
+	if !bytes.HasPrefix(trimmed, []byte("---")) {
+		var fm bytes.Buffer
+		fm.WriteString("---\n")
+		if typ != "" {
+			fmt.Fprintf(&fm, "topic: %s\n", typ)
+		}
+		if pin {
+			fm.WriteString("pinned: true\n")
+		}
+		fm.WriteString("---\n\n")
+		return append(fm.Bytes(), raw...)
+	}
+	return injectIntoFrontmatter(raw, typ, pin)
 }
 
 // --- list ---
@@ -212,52 +257,45 @@ func cmdPush(args []string) error {
 func cmdList(args []string) error {
 	fs := flag.NewFlagSet("list", flag.ExitOnError)
 	limit := fs.Int("limit", 20, "max items to return")
-	typeFilter := fs.String("type", "", "filter by type")
-	asJSON := fs.Bool("json", false, "output raw JSON")
-	serverURL := fs.String("server", envOr("INFOWALL_URL", "http://localhost:8899"), "server URL")
-	apiKey := fs.String("api-key", os.Getenv("INFOWALL_API_KEY"), "API key")
-	fs.Parse(args)
+	typeFilter := fs.String("type", "", "compatibility alias for --topic")
+	topicFilter := fs.String("topic", "", "filter by topic")
+	cfg := addClientFlags(fs)
+	parseFlags(fs, args)
 
-	url := fmt.Sprintf("%s/api/items?limit=%d", strings.TrimRight(*serverURL, "/"), *limit)
+	url := fmt.Sprintf("%s?limit=%d", cfg.url("/api/items"), *limit)
+	if *topicFilter != "" {
+		*typeFilter = *topicFilter
+	}
 	if *typeFilter != "" {
-		url += "&type=" + *typeFilter
+		url += "&type=" + neturl.QueryEscape(*typeFilter)
 	}
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
-	if *apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+*apiKey)
-	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := cfg.do(http.MethodGet, url, "", nil)
 	if err != nil {
-		return err
+		return cfg.fail(err)
 	}
 	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("list failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return cfg.fail(fmt.Errorf("server %d: %s", resp.StatusCode, strings.TrimSpace(string(body))))
 	}
+	if cfg.asJSON {
+		writeRawJSONStdout(body)
+		return nil
+	}
+
 	var list struct {
 		Items []listItem `json:"items"`
 	}
-	body, _ := io.ReadAll(resp.Body)
 	if err := json.Unmarshal(body, &list); err != nil {
-		return fmt.Errorf("decode: %w", err)
-	}
-	if *asJSON {
-		fmt.Println(string(body))
-		return nil
+		return cfg.fail(fmt.Errorf("decode: %w", err))
 	}
 	if len(list.Items) == 0 {
 		fmt.Println("(no items — push something with `infowall push <file>`)")
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tTYPE\tPINNED\tAGE\tTITLE")
+	fmt.Fprintln(tw, "ID\tTOPIC\tPINNED\tAGE\tTITLE")
 	for _, it := range list.Items {
-		shortID := it.ID
-		if len(shortID) > 8 {
-			shortID = shortID[:8]
-		}
 		pin := " "
 		if it.Pinned {
 			pin = "📌"
@@ -266,7 +304,7 @@ func cmdList(args []string) error {
 		if len(title) > 60 {
 			title = title[:57] + "…"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", shortID, it.Type, pin, relativeTime(it.CreatedAt), title)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", shortID(it.ID), it.Type, pin, relativeTime(it.CreatedAt), title)
 	}
 	tw.Flush()
 	return nil
@@ -280,31 +318,95 @@ type listItem struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// --- get ---
+
+func cmdGet(args []string) error {
+	fs := flag.NewFlagSet("get", flag.ExitOnError)
+	raw := fs.Bool("raw", false, "include the raw markdown source")
+	cfg := addClientFlags(fs)
+	parseFlags(fs, args)
+	if fs.NArg() < 1 {
+		return cfg.fail(errors.New("usage: infowall get <id> [--raw] [--json]"))
+	}
+	id := fs.Arg(0)
+
+	url := cfg.url("/api/items/" + id)
+	if *raw {
+		url += "?raw=1"
+	}
+	resp, err := cfg.do(http.MethodGet, url, "", nil)
+	if err != nil {
+		return cfg.fail(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return cfg.fail(fmt.Errorf("server %d: %s", resp.StatusCode, strings.TrimSpace(string(body))))
+	}
+	if cfg.asJSON {
+		writeRawJSONStdout(body)
+		return nil
+	}
+
+	var it struct {
+		ID        string    `json:"id"`
+		Type      string    `json:"type"`
+		Title     string    `json:"title"`
+		Tags      []string  `json:"tags"`
+		Pinned    bool      `json:"pinned"`
+		Body      string    `json:"body"`
+		Raw       string    `json:"raw"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+	if err := json.Unmarshal(body, &it); err != nil {
+		return cfg.fail(fmt.Errorf("decode: %w", err))
+	}
+	fmt.Printf("id:      %s\n", it.ID)
+	fmt.Printf("topic:   %s\n", it.Type)
+	fmt.Printf("title:   %s\n", it.Title)
+	if len(it.Tags) > 0 {
+		fmt.Printf("tags:    %s\n", strings.Join(it.Tags, ", "))
+	}
+	fmt.Printf("pinned:  %v\n", it.Pinned)
+	fmt.Printf("created: %s\n", it.CreatedAt.Local().Format("2006-01-02 15:04:05"))
+	fmt.Println("---")
+	if *raw && it.Raw != "" {
+		fmt.Println(it.Raw)
+	} else {
+		fmt.Println(it.Body)
+	}
+	return nil
+}
+
 // --- pin/unpin ---
 
-func cmdPin(id string, pinned bool) error {
-	serverURL := envOr("INFOWALL_URL", "http://localhost:8899")
-	apiKey := os.Getenv("INFOWALL_API_KEY")
+func cmdPin(args []string, pinned bool) error {
 	action := "pin"
 	if !pinned {
 		action = "unpin"
 	}
-	body, _ := json.Marshal(map[string]any{"pinned": pinned})
-	url := fmt.Sprintf("%s/api/items/%s/pin", strings.TrimRight(serverURL, "/"), id)
-	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+	fs := flag.NewFlagSet(action, flag.ExitOnError)
+	cfg := addClientFlags(fs)
+	parseFlags(fs, args)
+	if fs.NArg() < 1 {
+		return cfg.fail(fmt.Errorf("usage: infowall %s <id> [--json]", action))
 	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	id := fs.Arg(0)
+
+	body, _ := json.Marshal(map[string]any{"pinned": pinned})
+	url := cfg.url("/api/items/" + id + "/pin")
+	resp, err := cfg.do(http.MethodPost, url, "application/json", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return cfg.fail(err)
 	}
 	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%s failed (%d): %s", action, resp.StatusCode, strings.TrimSpace(string(b)))
+		return cfg.fail(fmt.Errorf("%s failed (server %d): %s", action, resp.StatusCode, strings.TrimSpace(string(respBody))))
+	}
+	if cfg.asJSON {
+		writeRawJSONStdout(respBody)
+		return nil
 	}
 	fmt.Printf("%sned %s\n", action, id)
 	return nil
@@ -315,14 +417,14 @@ func cmdPin(id string, pinned bool) error {
 func cmdDelete(args []string) error {
 	fs := flag.NewFlagSet("delete", flag.ExitOnError)
 	yes := fs.Bool("yes", false, "skip confirmation")
-	serverURL := fs.String("server", envOr("INFOWALL_URL", "http://localhost:8899"), "server URL")
-	apiKey := fs.String("api-key", os.Getenv("INFOWALL_API_KEY"), "API key")
-	fs.Parse(args)
+	cfg := addClientFlags(fs)
+	parseFlags(fs, args)
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: infowall delete <id> [--yes]")
+		return cfg.fail(errors.New("usage: infowall delete <id> [--yes] [--json]"))
 	}
 	id := fs.Arg(0)
-	if !*yes {
+	// In JSON mode we never prompt (agents can't answer); --yes is implied.
+	if !*yes && !cfg.asJSON {
 		fmt.Printf("delete %s? [y/N] ", id)
 		var ans string
 		fmt.Fscanln(os.Stdin, &ans)
@@ -331,37 +433,192 @@ func cmdDelete(args []string) error {
 			return nil
 		}
 	}
-	url := fmt.Sprintf("%s/api/items/%s", strings.TrimRight(*serverURL, "/"), id)
-	req, _ := http.NewRequest(http.MethodDelete, url, nil)
-	if *apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+*apiKey)
-	}
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	url := cfg.url("/api/items/" + id)
+	resp, err := cfg.do(http.MethodDelete, url, "", nil)
 	if err != nil {
-		return err
+		return cfg.fail(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("delete failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return cfg.fail(fmt.Errorf("delete failed (server %d): %s", resp.StatusCode, strings.TrimSpace(string(b))))
+	}
+	if cfg.asJSON {
+		writeJSONStdout(map[string]any{"id": id, "deleted": true})
+		return nil
 	}
 	fmt.Printf("deleted %s\n", id)
 	return nil
 }
 
-// --- helpers ---
+// --- client config & shared HTTP helpers ---
 
-func readInput(file string, fileGiven bool) ([]byte, error) {
-	if file == "-" || file == "" {
-		// If no file argument was provided and stdin is a TTY, nudge the user.
-		if !fileGiven && isTTY() {
-			fmt.Fprintln(os.Stderr, "(reading from stdin; type or pipe markdown, then Ctrl-D to end)")
+// clientConfig holds the flags shared by every API-calling subcommand.
+type clientConfig struct {
+	server string
+	apiKey string
+	asJSON bool
+}
+
+// addClientFlags registers --server, --api-key, and --json on the given flag set
+// and returns a clientConfig whose fields are populated after fs.Parse.
+func addClientFlags(fs *flag.FlagSet) *clientConfig {
+	cfg := &clientConfig{}
+	fs.StringVar(&cfg.server, "server", envOr("INFOWALL_URL", "http://localhost:8899"), "server base URL")
+	fs.StringVar(&cfg.apiKey, "api-key", os.Getenv("INFOWALL_API_KEY"), "API key")
+	fs.BoolVar(&cfg.asJSON, "json", false, "output machine-readable JSON")
+	return cfg
+}
+
+// boolFlag mirrors the unexported flag.boolFlag interface so we can detect
+// boolean flags (which do not consume the following argument) when permuting.
+type boolFlag interface {
+	IsBoolFlag() bool
+}
+
+// parseFlags parses args while tolerating flags placed after positional
+// arguments (e.g. `push a.md b.md --json`). The standard library's flag package
+// stops at the first non-flag token; this permutes flags ahead of positionals
+// first so order does not matter, which is friendlier for scripts and agents.
+func parseFlags(fs *flag.FlagSet, args []string) {
+	var flags, positional []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
 		}
+		if len(a) > 1 && a[0] == '-' {
+			flags = append(flags, a)
+			// "--name=value" carries its own value.
+			name := strings.TrimLeft(a, "-")
+			if strings.ContainsRune(name, '=') {
+				continue
+			}
+			// Non-boolean flags consume the next token as their value.
+			if f := fs.Lookup(name); f != nil {
+				if bf, ok := f.Value.(boolFlag); ok && bf.IsBoolFlag() {
+					continue
+				}
+				if i+1 < len(args) {
+					flags = append(flags, args[i+1])
+					i++
+				}
+			}
+			continue
+		}
+		positional = append(positional, a)
+	}
+	// Append a "--" terminator so the flag package treats every permuted
+	// positional literally (e.g. a filename that begins with "-").
+	combined := append(flags, "--")
+	combined = append(combined, positional...)
+	fs.Parse(combined)
+}
+
+// url joins the configured server base with an API path.
+func (c *clientConfig) url(path string) string {
+	return strings.TrimRight(c.server, "/") + path
+}
+
+// do issues an HTTP request with auth applied. body may be nil.
+func (c *clientConfig) do(method, url, contentType string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest(method, url, body)
+	if err != nil {
+		return nil, err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	return client.Do(req)
+}
+
+// fail emits an error in the configured format. In JSON mode it writes
+// {"error": "..."} to stderr; otherwise it returns the error for main to print.
+// Either way the returned error triggers a non-zero exit.
+func (c *clientConfig) fail(err error) error {
+	if c.asJSON {
+		enc := json.NewEncoder(os.Stderr)
+		enc.Encode(map[string]string{"error": err.Error()})
+		return errEmitted{err}
+	}
+	return err
+}
+
+// errEmitted wraps an error whose message has already been shown to the user
+// (e.g. as JSON), so main() exits non-zero without printing it again.
+type errEmitted struct{ error }
+
+func writeJSONStdout(v any) {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	enc.Encode(v)
+}
+
+// writeRawJSONStdout writes server JSON through unchanged (already valid JSON).
+func writeRawJSONStdout(b []byte) {
+	os.Stdout.Write(bytes.TrimRight(b, "\n"))
+	fmt.Fprintln(os.Stdout)
+}
+
+// --- source expansion (files / stdin) ---
+
+// source is a single markdown input: either stdin or a file on disk.
+type source struct {
+	label   string // human/machine label shown in results
+	path    string // file path (empty when stdin)
+	isStdin bool
+	err     error // expansion-time error (e.g. missing file); surfaced at read()
+}
+
+func (s source) read() ([]byte, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.isStdin {
 		return io.ReadAll(os.Stdin)
 	}
-	return os.ReadFile(file)
+	return os.ReadFile(s.path)
 }
+
+// expandSources turns push arguments into a flat, ordered list of sources.
+// "-" (or no arguments at all) means stdin; every other argument is a single
+// file used as-is. Directories are rejected (push files explicitly, e.g. via a
+// shell glob like `push notes/*.md`). Per-argument problems (a missing path, a
+// directory) are attached to the source as an error rather than aborting the
+// whole batch, so a batch push still processes its remaining inputs.
+func expandSources(args []string) ([]source, error) {
+	if len(args) == 0 {
+		if isTTY() {
+			fmt.Fprintln(os.Stderr, "(reading from stdin; type or pipe markdown, then Ctrl-D to end)")
+		}
+		return []source{{label: "<stdin>", isStdin: true}}, nil
+	}
+	var out []source
+	for _, arg := range args {
+		if arg == "-" {
+			out = append(out, source{label: "<stdin>", isStdin: true})
+			continue
+		}
+		info, err := os.Stat(arg)
+		if err != nil {
+			out = append(out, source{label: arg, path: arg, err: err})
+			continue
+		}
+		if info.IsDir() {
+			out = append(out, source{label: arg, err: fmt.Errorf("is a directory (push files individually, e.g. %s/*.md)", strings.TrimRight(arg, "/"))})
+			continue
+		}
+		out = append(out, source{label: arg, path: arg})
+	}
+	return out, nil
+}
+
+// --- helpers ---
 
 func isTTY() bool {
 	fi, err := os.Stdin.Stat()
@@ -376,6 +633,13 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 func relativeTime(t time.Time) string {
@@ -394,7 +658,7 @@ func relativeTime(t time.Time) string {
 	}
 }
 
-// injectIntoFrontmatter does a dumb line-based insertion of type/pinned into an existing frontmatter.
+// injectIntoFrontmatter does a dumb line-based insertion of topic/pinned into an existing frontmatter.
 // Finds the first "---" fence and the closing "---", then appends fields just before the closing fence.
 func injectIntoFrontmatter(raw []byte, typ string, pinned bool) []byte {
 	if typ == "" && !pinned {
@@ -418,8 +682,10 @@ func injectIntoFrontmatter(raw []byte, typ string, pinned bool) []byte {
 	afterFM = strings.TrimPrefix(afterFM, "\n")
 
 	var inject []string
-	if typ != "" && !strings.Contains(fmBody, "\ntype:") && !strings.HasPrefix(fmBody, "type:") {
-		inject = append(inject, "type: "+typ)
+	hasType := strings.Contains(fmBody, "\ntype:") || strings.HasPrefix(fmBody, "type:")
+	hasTopic := strings.Contains(fmBody, "\ntopic:") || strings.HasPrefix(fmBody, "topic:")
+	if typ != "" && !hasType && !hasTopic {
+		inject = append(inject, "topic: "+typ)
 	}
 	if pinned && !strings.Contains(fmBody, "pinned:") {
 		inject = append(inject, "pinned: true")

@@ -25,9 +25,9 @@ import (
 type Config struct {
 	Addr   string
 	DBPath string
-	Dev    bool     // true → proxy frontend to Vite dev server on :5173
-	APIKey string   // optional; if set, requests must carry Authorization: Bearer <key> or ?key=<key>
-	DistFS fs.FS    // embedded production frontend (ignored in Dev mode)
+	Dev    bool   // true → proxy frontend to Vite dev server on :5173
+	APIKey string // optional; if set, requests must carry Authorization: Bearer <key> or ?key=<key>
+	DistFS fs.FS  // embedded production frontend (ignored in Dev mode)
 }
 
 // Server wires together store, hub, and HTTP routes.
@@ -73,6 +73,7 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("GET /api/health", api(s.handleHealth))
 	s.mux.HandleFunc("GET /api/items", api(s.handleListItems))
+	s.mux.HandleFunc("GET /api/items/{id}", api(s.handleGetItem))
 	s.mux.HandleFunc("POST /api/items", api(s.handleCreateItem))
 	s.mux.HandleFunc("POST /api/items/{id}/pin", api(s.handlePinItem))
 	s.mux.HandleFunc("DELETE /api/items/{id}", api(s.handleDeleteItem))
@@ -142,6 +143,9 @@ func (s *Server) handleListItems(w http.ResponseWriter, r *http.Request) {
 	limit := intParam(q.Get("limit"), 50, 1, 200)
 	offset := intParam(q.Get("offset"), 0, 0, 1_000_000)
 	typeFilter := strings.TrimSpace(q.Get("type"))
+	if typeFilter == "" {
+		typeFilter = strings.TrimSpace(q.Get("topic"))
+	}
 
 	items, err := s.store.List(r.Context(), limit, offset, typeFilter)
 	if err != nil {
@@ -154,6 +158,25 @@ func (s *Server) handleListItems(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+// handleGetItem returns a single item by id. The raw markdown source is included
+// only when ?raw=1 is passed, mirroring handleListItems.
+func (s *Server) handleGetItem(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	it, err := s.store.Get(r.Context(), id)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, store.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeErr(w, status, err)
+		return
+	}
+	if r.URL.Query().Get("raw") != "1" {
+		it.Raw = ""
+	}
+	writeJSON(w, http.StatusOK, it)
 }
 
 func (s *Server) handleCreateItem(w http.ResponseWriter, r *http.Request) {

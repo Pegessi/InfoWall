@@ -7,6 +7,7 @@ interface CardHeaderProps {
   item: Item;
   onPin: (id: string, pinned: boolean) => void;
   onDelete: (id: string) => void;
+  showTypeLabel?: boolean;
 }
 
 function hostOf(url?: string): string | null {
@@ -18,7 +19,12 @@ function hostOf(url?: string): string | null {
   }
 }
 
-export function CardHeader({ item, onPin, onDelete }: CardHeaderProps) {
+export function CardHeader({
+  item,
+  onPin,
+  onDelete,
+  showTypeLabel = true,
+}: CardHeaderProps) {
   const Icon = ICON_MAP[item.type] ?? ICON_MAP.note;
   const absTime = formatAbsolute(item.created_at);
   const relTime = formatRelative(item.created_at);
@@ -39,23 +45,25 @@ export function CardHeader({ item, onPin, onDelete }: CardHeaderProps) {
 
       {/* Middle: title + meta */}
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-[hsl(var(--muted-foreground))] capitalize">
-            {item.type === "stock-chart" ? "chart" : item.type}
-          </span>
-        </div>
+        {showTypeLabel && (
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-[hsl(var(--muted-foreground))] capitalize">
+              {item.type === "stock-chart" ? "chart" : item.type}
+            </span>
+          </div>
+        )}
         {item.meta?.url ? (
           <a
             href={item.meta.url}
             target="_blank"
             rel="noreferrer noopener"
-            className="mt-0.5 block truncate font-semibold text-base text-[hsl(var(--accent))] hover:underline"
+            className="block truncate font-semibold text-base text-[hsl(var(--accent))] hover:underline"
             title={item.title}
           >
             {item.title}
           </a>
         ) : (
-          <h2 className="mt-0.5 font-semibold text-base leading-snug" title={item.title}>
+          <h2 className="font-semibold text-base leading-snug" title={item.title}>
             {item.title}
           </h2>
         )}

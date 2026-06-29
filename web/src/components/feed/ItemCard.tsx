@@ -6,9 +6,15 @@ interface ItemCardProps {
   item: Item;
   onPin: (id: string, pinned: boolean) => void;
   onDelete: (id: string) => void;
+  showTypeLabel?: boolean;
 }
 
-export function ItemCard({ item, onPin, onDelete }: ItemCardProps) {
+export function ItemCard({
+  item,
+  onPin,
+  onDelete,
+  showTypeLabel = true,
+}: ItemCardProps) {
   const Renderer = getRenderer(item.type);
   return (
     <article
@@ -16,7 +22,12 @@ export function ItemCard({ item, onPin, onDelete }: ItemCardProps) {
         item.pinned ? "ring-1 ring-[hsl(var(--accent)/0.4)]" : ""
       }`}
     >
-      <CardHeader item={item} onPin={onPin} onDelete={onDelete} />
+      <CardHeader
+        item={item}
+        onPin={onPin}
+        onDelete={onDelete}
+        showTypeLabel={showTypeLabel}
+      />
       <div className="mt-4">
         <Renderer item={item} />
       </div>

@@ -67,6 +67,21 @@ This is a **simple** note.`)
 	}
 }
 
+func TestParseTopicAlias(t *testing.T) {
+	raw := []byte(`---
+topic: link
+title: Topic Alias
+---
+body`)
+	it, err := Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if it.Type != "link" {
+		t.Errorf("topic alias produced type = %q, want link", it.Type)
+	}
+}
+
 func TestParseTitleFromH1(t *testing.T) {
 	raw := []byte(`---
 type: note

@@ -34,19 +34,35 @@ echo "# hello world" | ./bin/infowall push -
 Open <http://localhost:8899> in a browser. New items appear live without a
 page refresh.
 
+The browser groups same-topic items into topic panels by default: links, notes,
+papers, images, and charts each get their own fixed-height panel with the
+newest items first and an internal scroll area. Use the stack/columns layout
+controls and presets to choose vertical topic panels or side-by-side topic
+columns. Column order, width, and panel-height changes are stored in local
+browser storage and restored on the next visit. Drag a panel's bottom edge or
+use its height buttons to resize it; opening a topic header shows that topic's
+feed by itself for focused reading.
+
 ---
 
 ## CLI reference
 
 ```
 infowall serve    [--addr :8899] [--db infowall.db] [--dev] [--api-key KEY]
-infowall push     [file|-] [-t TYPE] [--server URL] [--api-key KEY] [--pin]
-infowall list     [--limit N] [--type TYPE] [--json]
-infowall pin      <id>
-infowall unpin    <id>
-infowall delete   <id> [--yes]
+infowall push     [file|- ...] [-t/--topic TOPIC] [--type TYPE] [--pin] [--server URL] [--api-key KEY] [--json]
+infowall list     [--limit N] [--topic TOPIC] [--type TYPE] [--server URL] [--api-key KEY] [--json]
+infowall get      <id> [--raw] [--server URL] [--api-key KEY] [--json]
+infowall pin      <id> [--server URL] [--api-key KEY] [--json]
+infowall unpin    <id> [--server URL] [--api-key KEY] [--json]
+infowall delete   <id> [--yes] [--server URL] [--api-key KEY] [--json]
 infowall version
 ```
+
+Every command that talks to the server accepts `--server`, `--api-key`, and
+`--json`, and honours the `INFOWALL_URL` / `INFOWALL_API_KEY` environment
+variables (flags take precedence). Flags may appear before or after positional
+arguments. See [Agent / scripting usage](#agent--scripting-usage) for the JSON
+output and exit-code contract.
 
 ### `serve`
 
@@ -61,26 +77,73 @@ Starts the HTTP + SSE server.
 
 ### `push`
 
-Push a markdown item from a file or stdin. If the first line is `---`, the
-document is parsed as YAML frontmatter + markdown body; otherwise, `--type`
-wraps the body in a minimal frontmatter block. Use `--pin` to mark the item as
-pinned on push.
+Upload one or more markdown items. Each argument may be a **file** or `-` for
+**stdin**. With no argument it reads stdin. Every document becomes a separate
+item. To push a whole folder, expand it with a shell glob (e.g.
+`infowall push notes/*.md`) — directory arguments are rejected.
+
+If a document begins with `---` it is parsed as YAML frontmatter + markdown
+body; otherwise `--topic` / `--pin` wrap it in a minimal frontmatter block (when
+frontmatter is already present, the fields are merged in without overriding an
+existing `type` or `topic`). `--type` is kept as a compatibility alias for
+older scripts. This is the recommended way to push complex content: keep it in
+markdown files rather than squeezing it onto the command line.
 
 ```bash
-./bin/infowall push note.md                          # from a file
+./bin/infowall push note.md                          # one file
+./bin/infowall push notes/*.md                        # a folder, via a shell glob
+./bin/infowall push a.md b.md c.md                    # several files at once
 echo "done for today" | ./bin/infowall push -        # from stdin (note)
-./bin/infowall push - -t link --pin < link.md        # override type, pin it
+./bin/infowall push - -t link --pin < link.md        # set topic, pin it
+./bin/infowall push docs/*.md --json                  # machine-readable result
 ```
+
+`push` is non-interactive whenever it is given file arguments, so it never
+blocks. In a batch, a bad source (missing file, a directory, server error) is
+reported but does not stop the remaining sources; the command exits non-zero
+if **any** source failed.
 
 ### `list`
 
-Print recent items in a tabular view. Use `--json` for raw JSON. `--type`
-filters the feed server-side.
+Print recent items in a tabular view. Use `--json` for the raw server JSON
+(the full item objects). `--topic` filters the feed server-side; `--type` is a
+compatibility alias.
+
+### `get`
+
+Fetch a single item by id. Prints a readable summary plus the rendered body, or
+the full item JSON with `--json`. Pass `--raw` to include the original markdown
+source (the rendered/`--json` body otherwise omits it). A missing id exits
+non-zero.
 
 ### `pin` / `unpin` / `delete`
 
-Operate on an item by id (full or first-8-hex prefix from `list`). `delete`
-prompts for confirmation unless `--yes` is passed.
+Operate on an item by its id (as shown by `list`). `delete` prompts for
+confirmation unless `--yes` is passed; in `--json` mode it never prompts (so it
+is safe for automation) and emits `{"id": "...", "deleted": true}`.
+
+### Agent / scripting usage
+
+The CLI is designed to be driven by scripts and agents:
+
+- **`--json` everywhere.** `push` prints an array of per-source result objects
+  (`source`, `id`, `type`, `title`, or `error`); `type` is the JSON field that
+  stores the item's topic for API compatibility. `list` / `get` / `pin` /
+  `unpin` echo the server's JSON; `delete` prints `{"id", "deleted"}`.
+- **Structured errors.** In `--json` mode a failure writes
+  `{"error": "..."}` to **stderr** and leaves stdout clean.
+- **Exit codes.** Any failure (network error, non-2xx response, missing id,
+  one-or-more failed sources in a batch) exits non-zero; success exits `0`.
+- **No surprise prompts.** `push` with arguments and `delete --json` never read
+  from the terminal.
+
+```bash
+# pipe complex content from files and collect the new ids
+ids=$(infowall push docs/*.md --json | jq -r '.[].id')
+
+# fetch an item's raw markdown back out
+infowall get "$id" --raw --json | jq -r '.raw'
+```
 
 ---
 
@@ -91,7 +154,7 @@ by `---`) controls metadata; everything after the closing `---` is the body.
 
 ```markdown
 ---
-type: paper
+topic: paper
 title: Attention Is All You Need
 authors: [Vaswani et al.]
 published: 2017-06-12
@@ -102,13 +165,15 @@ pinned: false
 The body is full markdown: **bold**, lists, code blocks, tables, etc.
 ```
 
-If no frontmatter is present the item defaults to `type: note` and the title
-is derived from the first `# Heading` or first non-empty line. The `type`
-field selects which renderer the frontend uses for the card.
+If no frontmatter is present the item defaults to `topic: note` and the title
+is derived from the first `# Heading` or first non-empty line. The `topic`
+field selects which renderer and topic panel the frontend uses for the card.
+`type` remains accepted as a backward-compatible alias in frontmatter and in the
+JSON API.
 
 ---
 
-## Built-in content types
+## Built-in topics / content types
 
 ### `note` (default)
 
@@ -203,7 +268,8 @@ All POST bodies accept `text/markdown` (raw markdown bytes), `text/plain`, or
 | Method | Path                              | Description                              |
 |--------|-----------------------------------|------------------------------------------|
 | GET    | `/api/health`                     | `{"ok": true, "ts": "..."}`              |
-| GET    | `/api/items?limit=50&offset=0&type=paper` | List items (newest first)         |
+| GET    | `/api/items?limit=50&offset=0&topic=paper` | List items (newest first); `type=paper` also works |
+| GET    | `/api/items/{id}?raw=1`           | Fetch one item (`raw=1` includes source) |
 | POST   | `/api/items`                      | Create an item                           |
 | POST   | `/api/items/{id}/pin?pinned=1`    | Pin/unpin an item                        |
 | DELETE | `/api/items/{id}`                 | Delete an item                           |

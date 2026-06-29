@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/infowall/infowall/internal/model"
 	"github.com/yuin/goldmark"
+	meta "github.com/yuin/goldmark-meta"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
-	meta "github.com/yuin/goldmark-meta"
-	"github.com/infowall/infowall/internal/model"
 )
 
 // md is the shared goldmark instance with GFM + YAML frontmatter support.
@@ -67,8 +67,11 @@ func Parse(raw []byte) (*model.Item, error) {
 		CreatedAt: time.Now().UTC(),
 	}
 
-	// Type
+	// Type/topic. "topic" is the user-facing grouping name; "type" remains the
+	// stored/API field for compatibility.
 	if v, ok := metaMap["type"].(string); ok && v != "" {
+		it.Type = v
+	} else if v, ok := metaMap["topic"].(string); ok && v != "" {
 		it.Type = v
 	}
 

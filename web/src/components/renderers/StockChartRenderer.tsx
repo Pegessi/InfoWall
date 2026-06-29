@@ -12,11 +12,41 @@ interface OhlcPoint {
   volume?: number;
 }
 
-function hslVar(name: string): string {
+// Read a CSS custom property holding space-separated HSL channels (the
+// Tailwind v4 convention, e.g. "240 5% 64.9%") and return an rgb()/rgba()
+// string. lightweight-charts' color parser does not understand modern hsl()
+// syntax, so we convert to rgb here rather than handing it an hsl() string.
+function hslVar(name: string, alpha?: number): string {
   const raw = getComputedStyle(document.documentElement)
     .getPropertyValue(name)
     .trim();
-  return raw ? `hsl(${raw})` : "";
+  if (!raw) return "";
+  const parts = raw.split(/\s+/);
+  if (parts.length < 3) return "";
+  const h = parseFloat(parts[0]);
+  const s = parseFloat(parts[1]) / 100;
+  const l = parseFloat(parts[2]) / 100;
+  if (Number.isNaN(h) || Number.isNaN(s) || Number.isNaN(l)) return "";
+
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = l - c / 2;
+  let r = 0;
+  let g = 0;
+  let b = 0;
+  if (h < 60) [r, g, b] = [c, x, 0];
+  else if (h < 120) [r, g, b] = [x, c, 0];
+  else if (h < 180) [r, g, b] = [0, c, x];
+  else if (h < 240) [r, g, b] = [0, x, c];
+  else if (h < 300) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+
+  const R = Math.round((r + m) * 255);
+  const G = Math.round((g + m) * 255);
+  const B = Math.round((b + m) * 255);
+  return alpha === undefined
+    ? `rgb(${R}, ${G}, ${B})`
+    : `rgba(${R}, ${G}, ${B}, ${alpha})`;
 }
 
 export function StockChartRenderer({ item }: { item: Item }) {
@@ -38,6 +68,8 @@ export function StockChartRenderer({ item }: { item: Item }) {
     const border = hslVar("--border");
     const positive = hslVar("--positive");
     const negative = hslVar("--negative");
+    const positiveFaded = hslVar("--positive", 0.5);
+    const negativeFaded = hslVar("--negative", 0.5);
 
     const chart = createChart(containerRef.current, {
       autoSize: true,
@@ -89,7 +121,7 @@ export function StockChartRenderer({ item }: { item: Item }) {
         data.map((d) => ({
           time: d.time as Time,
           value: d.volume ?? 0,
-          color: d.close >= d.open ? positive + "80" : negative + "80",
+          color: d.close >= d.open ? positiveFaded : negativeFaded,
         })) as HistogramData<Time>[]
       );
     }

@@ -33,7 +33,9 @@ export async function fetchItems(
     headers: { ...authHeaders() },
   });
   if (!res.ok) throw new Error(`fetchItems failed: ${res.status}`);
-  return (await res.json()) as Item[];
+  // The server responds with { items: [...] }; tolerate a bare array too.
+  const data = (await res.json()) as Item[] | { items: Item[] };
+  return Array.isArray(data) ? data : data.items ?? [];
 }
 
 export async function pushItem(markdown: string): Promise<Item> {
@@ -51,7 +53,7 @@ export async function pushItem(markdown: string): Promise<Item> {
 
 export async function pinItem(id: string, pinned: boolean): Promise<void> {
   const res = await fetch(`${API_BASE}/api/items/${encodeURIComponent(id)}/pin`, {
-    method: "PUT",
+    method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...authHeaders(),
