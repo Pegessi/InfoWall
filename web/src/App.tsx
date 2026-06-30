@@ -9,7 +9,7 @@ export default function App() {
   return (
     <>
       <Header />
-      <main className="mx-auto w-full max-w-[1600px] px-4 py-6 sm:px-6 sm:py-8">
+      <main className="min-h-[calc(100vh-3rem)] w-full px-2 py-2 sm:px-3 lg:px-4">
         <FeedList />
       </main>
     </>

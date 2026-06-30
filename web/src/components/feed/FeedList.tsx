@@ -39,6 +39,13 @@ import { ItemCard } from "./ItemCard";
 import { EmptyState } from "./EmptyState";
 
 const PANEL_HEIGHT_STEP = 80;
+const PANEL_VIEWPORT_FILL_HEIGHT = "calc(100vh - 8.5rem)";
+
+function topicPanelStyle(column: TopicColumnPreference): CSSProperties {
+  return {
+    height: `min(${PANEL_MAX_HEIGHT}px, max(${column.height}px, ${PANEL_VIEWPORT_FILL_HEIGHT}))`,
+  };
+}
 
 export function FeedList() {
   const { items, loading, error, hasMore, loadingMore, loadMore, pinItem, deleteItem } =
@@ -65,7 +72,7 @@ export function FeedList() {
     : CUSTOM_PRESET_ID;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       {loading && items.length === 0 && (
         <>
           {[0, 1, 2].map((i) => (
@@ -315,7 +322,7 @@ function TopicStack({
   if (visibleColumns.length === 0) return null;
 
   return (
-    <div className={cn("space-y-6", className)} data-feed-layout="topic-stack">
+    <div className={cn("space-y-3", className)} data-feed-layout="topic-stack">
       {visibleColumns.map((column) => {
         const items = groupedItems.get(column.id) ?? [];
         const label = formatTopicLabel(column.id);
@@ -325,7 +332,7 @@ function TopicStack({
           <section
             key={column.id}
             data-topic-panel={column.id}
-            style={{ height: `${column.height}px` }}
+            style={topicPanelStyle(column)}
             className="group/topic-panel relative flex min-w-0 flex-col rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] shadow-sm"
           >
             <TopicPanelHeader
@@ -340,9 +347,9 @@ function TopicStack({
             />
             <div
               data-topic-scroll={column.id}
-              className="min-h-0 flex-1 overflow-y-auto px-3 pb-6 pt-3 sm:px-4"
+              className="min-h-0 flex-1 overflow-y-auto px-2 pb-4 pt-2.5 sm:px-3"
             >
-              <div className="space-y-4">
+              <div className="space-y-3">
                 {items.map((item) => (
                   <ItemCard
                     key={item.id}
@@ -654,8 +661,8 @@ function TopicBoard({
   if (visibleColumns.length === 0) return null;
 
   return (
-    <div className="hidden overflow-x-auto pb-3 lg:block" data-feed-layout="topics">
-      <div className="grid items-start gap-4" style={gridStyle}>
+    <div className="hidden overflow-x-auto pb-2 lg:block" data-feed-layout="topics">
+      <div className="grid items-start gap-3" style={gridStyle}>
         {visibleColumns.map((column, index) => {
           const items = groupedItems.get(column.id) ?? [];
           const label = formatTopicLabel(column.id);
@@ -668,7 +675,7 @@ function TopicBoard({
             <section
               key={column.id}
               data-topic-panel={column.id}
-              style={{ height: `${column.height}px` }}
+              style={topicPanelStyle(column)}
               className={cn(
                 "group/topic-panel relative flex min-w-0 flex-col rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] shadow-sm transition-opacity",
                 isDragging && "opacity-50",
@@ -853,9 +860,9 @@ function TopicBoard({
 
               <div
                 data-topic-scroll={column.id}
-                className="min-h-0 flex-1 overflow-y-auto px-3 pb-5 pt-3"
+                className="min-h-0 flex-1 overflow-y-auto px-2.5 pb-4 pt-2.5"
               >
-                <div className="space-y-4">
+                <div className="space-y-3">
                   {items.map((item) => (
                     <ItemCard
                       key={item.id}
@@ -900,8 +907,8 @@ function TopicFocusView({
   const Icon = ICON_MAP[topicId] ?? ICON_MAP.note;
 
   return (
-    <section className="mx-auto w-full max-w-4xl">
-      <div className="sticky top-16 z-[5] mb-4 flex items-center gap-3 rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--background)/0.94)] px-3 py-2 shadow-sm backdrop-blur">
+    <section className="w-full">
+      <div className="sticky top-14 z-[5] mb-3 flex items-center gap-3 rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--background)/0.94)] px-3 py-2 shadow-sm backdrop-blur">
         <button
           type="button"
           onClick={onBack}
@@ -925,7 +932,7 @@ function TopicFocusView({
       </div>
 
       {items.length > 0 ? (
-        <div className="space-y-6">
+        <div className="space-y-3">
           {items.map((item) => (
             <ItemCard
               key={item.id}

@@ -4,8 +4,8 @@ import { useTheme } from "@/hooks/useTheme";
 export function Header() {
   const { theme, toggleTheme } = useTheme();
   return (
-    <header className="sticky top-0 z-10 h-14 border-b border-[hsl(var(--border))] bg-[hsl(var(--background)/0.8)] backdrop-blur">
-      <div className="mx-auto flex h-full max-w-[1600px] items-center justify-between px-4 sm:px-6">
+    <header className="sticky top-0 z-10 h-12 border-b border-[hsl(var(--border))] bg-[hsl(var(--background)/0.8)] backdrop-blur">
+      <div className="flex h-full w-full items-center justify-between px-2 sm:px-3 lg:px-4">
         <div className="flex items-center gap-2">
           <span className="h-2 w-2 rounded-full bg-[hsl(var(--accent))]" />
           <span className="text-lg font-semibold tracking-tight">Infowall</span>
