@@ -25,17 +25,65 @@ export async function fetchItems(
   offset = 0,
   type?: string
 ): Promise<Item[]> {
+  const page = await fetchItemsPage({ limit, offset, type });
+  return page.items;
+}
+
+export interface FetchItemsOptions {
+  limit?: number;
+  offset?: number;
+  cursor?: string | null;
+  type?: string;
+  /** Full-history text search (matches title/body/type/tags/meta server-side). */
+  query?: string;
+  /** Restrict to pinned items when true. */
+  pinnedOnly?: boolean;
+}
+
+export interface ItemsPage {
+  items: Item[];
+  has_more: boolean;
+  next_cursor?: string;
+}
+
+export async function fetchItemsPage({
+  limit = 50,
+  offset = 0,
+  cursor,
+  type,
+  query,
+  pinnedOnly,
+}: FetchItemsOptions = {}): Promise<ItemsPage> {
   const params = new URLSearchParams();
   params.set("limit", String(limit));
-  params.set("offset", String(offset));
+  if (cursor) {
+    params.set("cursor", cursor);
+  } else {
+    params.set("offset", String(offset));
+  }
   if (type) params.set("type", type);
+  if (query && query.trim() !== "") params.set("q", query.trim());
+  if (pinnedOnly) params.set("pinned", "1");
   const res = await fetch(`${API_BASE}/api/items?${params.toString()}`, {
     headers: { ...authHeaders() },
   });
   if (!res.ok) throw new Error(`fetchItems failed: ${res.status}`);
   // The server responds with { items: [...] }; tolerate a bare array too.
-  const data = (await res.json()) as Item[] | { items: Item[] };
-  return Array.isArray(data) ? data : data.items ?? [];
+  const data = (await res.json()) as
+    | Item[]
+    | { items?: Item[]; has_more?: boolean; next_cursor?: string };
+  if (Array.isArray(data)) {
+    return {
+      items: data,
+      has_more: data.length === limit,
+    };
+  }
+  const items = data.items ?? [];
+  return {
+    items,
+    has_more: data.has_more ?? items.length === limit,
+    next_cursor: data.next_cursor,
+  };
 }
 
 export async function pushItem(markdown: string): Promise<Item> {

@@ -11,6 +11,8 @@ import {
   MoveHorizontal,
   MoveVertical,
   Rows3,
+  SearchX,
+  X,
 } from "lucide-react";
 import {
   useCallback,
@@ -20,6 +22,7 @@ import {
   type CSSProperties,
   type DragEvent,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
 import { useFeed } from "@/hooks/useFeed";
 import { useFeedLayout } from "@/hooks/useFeedLayout";
@@ -32,11 +35,20 @@ import {
   type FeedLayoutMode,
   type TopicColumnPreference,
 } from "@/lib/feedLayout";
+import {
+  availableTypes as deriveAvailableTypes,
+  isFilterActive,
+  EMPTY_FEED_FILTER,
+  type FeedFilter,
+  type PinnedFilter,
+} from "@/lib/feedFilter";
 import type { Item } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { ICON_MAP } from "./iconMap";
 import { ItemCard } from "./ItemCard";
 import { EmptyState } from "./EmptyState";
+import { FeedFilterBar } from "./FeedFilterBar";
+import { ConnectionStatus } from "./ConnectionStatus";
 
 const PANEL_HEIGHT_STEP = 80;
 const PANEL_VIEWPORT_FILL_HEIGHT = "calc(100vh - 8.5rem)";
@@ -48,12 +60,39 @@ function topicPanelStyle(column: TopicColumnPreference): CSSProperties {
 }
 
 export function FeedList() {
-  const { items, loading, error, hasMore, loadingMore, loadMore, pinItem, deleteItem } =
-    useFeed();
-  const groupedItems = useMemo(() => groupItemsByTopic(items), [items]);
+  const [filter, setFilter] = useState<FeedFilter>(EMPTY_FEED_FILTER);
+  const {
+    items,
+    loading,
+    error,
+    hasMore,
+    loadingMore,
+    connection,
+    loadMore,
+    pinItem,
+    deleteItem,
+    retry,
+  } = useFeed(filter);
+
+  const filterActive = isFilterActive(filter);
+  // items are already filtered server-side (full history); the type dropdown is
+  // sourced from the loaded items so it reflects topics currently in view.
+  const typeOptions = useMemo(() => deriveAvailableTypes(items), [items]);
+  // No results for the ACTIVE query once loading settles (server returned none).
+  const noResults = !loading && filterActive && items.length === 0;
+  // Distinguish a genuinely empty wall (no filter, no items) from a filtered
+  // zero-result set so the first-run guidance only shows on a truly empty wall.
+  const emptyWall = !loading && !filterActive && items.length === 0 && !error;
+
+  const groupedItems = useMemo(
+    () => groupItemsByTopic(items),
+    [items]
+  );
+  // Drive the layout from the loaded topic set so column order/width/height
+  // persistence stays coherent. Panels only render topics that have items.
   const topicIds = useMemo(
-    () => sortTopicIds(Array.from(groupedItems.keys())),
-    [groupedItems]
+    () => sortTopicIds(deriveAvailableTypes(items)),
+    [items]
   );
   const {
     layout,
@@ -71,6 +110,13 @@ export function FeedList() {
     ? layout.presetId
     : CUSTOM_PRESET_ID;
 
+  const resetFilter = useCallback(() => setFilter(EMPTY_FEED_FILTER), []);
+
+  // The controls (search/filter + layout + connection status) stay visible
+  // whenever the wall is not empty OR a filter is active, so an operator can
+  // adjust or clear a query that currently matches nothing.
+  const showControls = items.length > 0 || filterActive;
+
   return (
     <div className="space-y-3">
       {loading && items.length === 0 && (
@@ -84,7 +130,7 @@ export function FeedList() {
         </>
       )}
 
-      {!loading && items.length === 0 && !error && <EmptyState />}
+      {emptyWall && <EmptyState />}
 
       {error && items.length === 0 && (
         <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-6 text-center text-sm text-[hsl(var(--negative))]">
@@ -92,7 +138,7 @@ export function FeedList() {
         </div>
       )}
 
-      {items.length > 0 && (
+      {showControls && (
         <>
           {focusedTopicId ? (
             <TopicFocusView
@@ -104,14 +150,43 @@ export function FeedList() {
             />
           ) : (
             <>
-              <LayoutControls
-                mode={layout.mode}
-                presetValue={presetValue}
-                showCustomPreset={presetValue === CUSTOM_PRESET_ID}
-                presets={presets}
-                onModeChange={setMode}
-                onPresetChange={applyPreset}
-              />
+              <div className="space-y-2">
+                <FeedFilterBar
+                  filter={filter}
+                  availableTypes={typeOptions}
+                  resultCount={items.length}
+                  totalCount={items.length}
+                  hasMore={hasMore}
+                  onQueryChange={(query) =>
+                    setFilter((prev) => ({ ...prev, query }))
+                  }
+                  onTypeChange={(type) =>
+                    setFilter((prev) => ({ ...prev, type }))
+                  }
+                  onPinnedChange={(pinned: PinnedFilter) =>
+                    setFilter((prev) => ({ ...prev, pinned }))
+                  }
+                  onReset={resetFilter}
+                />
+                {!noResults && (
+                  <LayoutControls
+                    mode={layout.mode}
+                    presetValue={presetValue}
+                    showCustomPreset={presetValue === CUSTOM_PRESET_ID}
+                    presets={presets}
+                    onModeChange={setMode}
+                    onPresetChange={applyPreset}
+                    status={
+                      <ConnectionStatus state={connection} onRetry={retry} />
+                    }
+                  />
+                )}
+                {noResults && (
+                  <div className="flex justify-end">
+                    <ConnectionStatus state={connection} onRetry={retry} />
+                  </div>
+                )}
+              </div>
 
               {error && (
                 <div className="rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-3 text-sm text-[hsl(var(--negative))]">
@@ -119,7 +194,12 @@ export function FeedList() {
                 </div>
               )}
 
-              {layout.mode === "topics" ? (
+              {noResults ? (
+                <NoResultsState
+                  filterActive={filterActive}
+                  onReset={resetFilter}
+                />
+              ) : layout.mode === "topics" ? (
                 <>
                   <TopicStack
                     className="lg:hidden"
@@ -157,7 +237,7 @@ export function FeedList() {
         </>
       )}
 
-      {hasMore && (
+      {hasMore && !focusedTopicId && (
         <div className="pt-2">
           <button
             type="button"
@@ -176,6 +256,43 @@ export function FeedList() {
           </button>
         </div>
       )}
+
+      {items.length > 0 && !hasMore && !loading && !focusedTopicId && (
+        <div className="pt-1 text-center text-xs text-[hsl(var(--muted-foreground))]">
+          {filterActive
+            ? "End of results for this search."
+            : "End of history — all items are shown."}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface NoResultsStateProps {
+  filterActive: boolean;
+  onReset: () => void;
+}
+
+function NoResultsState({ filterActive, onReset }: NoResultsStateProps) {
+  return (
+    <div className="flex flex-col items-center gap-3 rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-6 py-10 text-center">
+      <SearchX
+        className="h-6 w-6 text-[hsl(var(--muted-foreground))]"
+        strokeWidth={1.75}
+      />
+      <div className="text-sm text-[hsl(var(--muted-foreground))]">
+        No items in the full history match this search.
+      </div>
+      {filterActive && (
+        <button
+          type="button"
+          onClick={onReset}
+          className="inline-flex h-9 items-center gap-1.5 rounded-md border border-[hsl(var(--border))] px-3 text-sm transition-colors hover:bg-[hsl(var(--muted))]"
+        >
+          <X className="h-3.5 w-3.5" strokeWidth={2} />
+          Clear filters
+        </button>
+      )}
     </div>
   );
 }
@@ -187,6 +304,7 @@ interface LayoutControlsProps {
   presets: ReturnType<typeof useFeedLayout>["presets"];
   onModeChange: (mode: FeedLayoutMode) => void;
   onPresetChange: (presetId: string) => void;
+  status?: ReactNode;
 }
 
 function LayoutControls({
@@ -196,10 +314,12 @@ function LayoutControls({
   presets,
   onModeChange,
   onPresetChange,
+  status,
 }: LayoutControlsProps) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3">
-      <div className="inline-flex rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-1">
+      <div className="inline-flex items-center gap-3">
+        <div className="inline-flex rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-1">
         <button
           type="button"
           aria-pressed={mode === "single"}
@@ -230,6 +350,8 @@ function LayoutControls({
         >
           <Columns3 className="h-4 w-4" strokeWidth={1.75} />
         </button>
+      </div>
+        {status}
       </div>
 
       <select

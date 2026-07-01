@@ -1,6 +1,8 @@
-import { Pin, PinOff, Trash2 } from "lucide-react";
+import { Check, Pin, PinOff, Trash2, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import type { Item } from "@/lib/types";
 import { formatRelative, formatAbsolute } from "@/lib/time";
+import { cn } from "@/lib/utils";
 import { ICON_MAP } from "./iconMap";
 
 interface CardHeaderProps {
@@ -29,6 +31,46 @@ export function CardHeader({
   const absTime = formatAbsolute(item.created_at);
   const relTime = formatRelative(item.created_at);
   const hostname = hostOf(item.meta?.url);
+
+  // Two-step delete guard: the first click arms a confirm state; only a second
+  // confirm actually deletes. A short timeout silently disarms so a forgotten
+  // armed card does not stay primed for deletion.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const resetTimer = useRef<number | null>(null);
+  const confirmButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  const clearResetTimer = () => {
+    if (resetTimer.current !== null) {
+      window.clearTimeout(resetTimer.current);
+      resetTimer.current = null;
+    }
+  };
+
+  const armDelete = () => {
+    setConfirmingDelete(true);
+    clearResetTimer();
+    resetTimer.current = window.setTimeout(() => {
+      setConfirmingDelete(false);
+      resetTimer.current = null;
+    }, 3000);
+  };
+
+  const cancelDelete = () => {
+    clearResetTimer();
+    setConfirmingDelete(false);
+  };
+
+  const confirmDelete = () => {
+    clearResetTimer();
+    setConfirmingDelete(false);
+    onDelete(item.id);
+  };
+
+  // Move focus to the confirm button when armed, and clean up the timer.
+  useEffect(() => {
+    if (confirmingDelete) confirmButtonRef.current?.focus();
+  }, [confirmingDelete]);
+  useEffect(() => () => clearResetTimer(), []);
 
   return (
     <div className="flex items-start gap-3">
@@ -89,7 +131,12 @@ export function CardHeader({
       </div>
 
       {/* Right: actions */}
-      <div className="hidden group-hover:flex gap-1 pt-0.5">
+      <div
+        className={cn(
+          "gap-1 pt-0.5",
+          confirmingDelete ? "flex" : "hidden group-hover:flex"
+        )}
+      >
         <button
           type="button"
           onClick={() => onPin(item.id, !item.pinned)}
@@ -103,15 +150,49 @@ export function CardHeader({
             <Pin className="h-4 w-4" strokeWidth={1.75} />
           )}
         </button>
-        <button
-          type="button"
-          onClick={() => onDelete(item.id)}
-          title="Delete"
-          aria-label="Delete item"
-          className="rounded p-1.5 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-[hsl(var(--negative))]"
-        >
-          <Trash2 className="h-4 w-4" strokeWidth={1.75} />
-        </button>
+
+        {confirmingDelete ? (
+          <div
+            className="flex items-center gap-1"
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                cancelDelete();
+              }
+            }}
+          >
+            <button
+              type="button"
+              ref={confirmButtonRef}
+              onClick={confirmDelete}
+              title="Confirm delete"
+              aria-label={`Confirm delete: ${item.title || "item"}`}
+              className="inline-flex items-center gap-1 rounded bg-[hsl(var(--negative))] px-2 py-1 text-xs font-medium text-white transition-colors hover:opacity-90"
+            >
+              <Check className="h-3.5 w-3.5" strokeWidth={2.25} />
+              <span>Delete</span>
+            </button>
+            <button
+              type="button"
+              onClick={cancelDelete}
+              title="Cancel"
+              aria-label="Cancel delete"
+              className="rounded p-1.5 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground"
+            >
+              <X className="h-4 w-4" strokeWidth={1.75} />
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={armDelete}
+            title="Delete"
+            aria-label="Delete item"
+            className="rounded p-1.5 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-[hsl(var(--negative))]"
+          >
+            <Trash2 className="h-4 w-4" strokeWidth={1.75} />
+          </button>
+        )}
       </div>
     </div>
   );
