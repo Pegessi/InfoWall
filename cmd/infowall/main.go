@@ -5,12 +5,16 @@
 //	push      push one or more markdown items (from files, stdin, or heredoc)
 //	list      list recent items
 //	get       fetch a single item by id
+//	export    export items for portable archive/audit
 //	pin/unpin toggle the pinned flag on an item
 //	delete    delete an item
+//	health    check that a running server is reachable
+//	doctor    run read-only local operation diagnostics
 //	version   print version info
 //
-// The push, list, get, pin, unpin, and delete commands all accept --json for
-// machine-readable output, making the CLI suitable for scripting and agents.
+// The push, list, get, export, pin, unpin, delete, health, and doctor commands
+// all accept --json for machine-readable output, making the CLI suitable for
+// scripting and agents.
 package main
 
 import (
@@ -24,11 +28,13 @@ import (
 	"net/http"
 	neturl "net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/infowall/infowall/internal/server"
+	"github.com/infowall/infowall/internal/store"
 )
 
 var (
@@ -64,12 +70,20 @@ func run(args []string) error {
 		return cmdList(rest)
 	case "get":
 		return cmdGet(rest)
+	case "export":
+		return cmdExport(rest)
 	case "pin":
 		return cmdPin(rest, true)
 	case "unpin":
 		return cmdPin(rest, false)
 	case "delete":
 		return cmdDelete(rest)
+	case "health":
+		return cmdHealth(rest)
+	case "doctor":
+		return cmdDoctor(rest)
+	case "db":
+		return cmdDB(rest)
 	case "version", "--version", "-v":
 		fmt.Printf("infowall v%s (commit %s)\n", version, commit)
 		return nil
@@ -90,9 +104,14 @@ Usage:
   infowall push    [file|- ...] [-t/--topic TOPIC] [--type TYPE] [--pin] [--server URL] [--api-key KEY] [--json]
   infowall list    [--limit N] [--topic TOPIC] [--type TYPE] [--server URL] [--api-key KEY] [--json]
   infowall get     <id> [--raw] [--server URL] [--api-key KEY] [--json]
+  infowall export  [id ...] [--format jsonl|json] [--out PATH] [--limit N] [--topic TOPIC] [--type TYPE] [--server URL] [--api-key KEY] [--json]
   infowall pin     <id> [--server URL] [--api-key KEY] [--json]
   infowall unpin   <id> [--server URL] [--api-key KEY] [--json]
   infowall delete  <id> [--yes] [--server URL] [--api-key KEY] [--json]
+  infowall health  [--server URL] [--api-key KEY] [--json]
+  infowall doctor  [--server URL] [--api-key KEY] [--json]
+  infowall db info   [--db infowall.db] [--json]
+  infowall db backup --out PATH [--db infowall.db] [--json]
   infowall version
 
 Examples:
@@ -105,10 +124,16 @@ Examples:
   infowall list --topic paper                 # filter a topic panel
   infowall list --json | jq '.items[].id'     # script-friendly output
   infowall get 1a2b3c4d --json               # fetch one item as JSON
+  infowall export --out archive.jsonl         # read-only portable archive
+  infowall health --json                      # verify the configured server
+  infowall doctor --json                      # health + auth diagnostic
+  infowall db info --json                     # report local DB path/size/count
+  infowall db backup --out backups/wall.db    # safe live backup (VACUUM INTO)
 
 Agent-friendly notes:
-  * Every command supports --json for structured stdout; on failure a JSON
-    object {"error": "..."} is written to stderr and the exit code is non-zero.
+  * Every server-talking client command supports --json for structured stdout;
+    on failure a JSON object {"error": "..."} is written to stderr and the exit
+    code is non-zero.
   * push is fully non-interactive when given file arguments, so it never
     blocks waiting for input. Use it to upload complex markdown from files
     instead of squeezing content onto the command line. Push whole folders
@@ -378,6 +403,288 @@ func cmdGet(args []string) error {
 	return nil
 }
 
+// --- export ---
+
+const exportPageSize = 200
+
+func cmdExport(args []string) error {
+	fs := flag.NewFlagSet("export", flag.ExitOnError)
+	format := fs.String("format", "jsonl", "archive format: jsonl or json")
+	out := fs.String("out", "", "write archive to this path instead of stdout (refuses to overwrite)")
+	limit := fs.Int("limit", 0, "max items to export; 0 means all")
+	typeFilter := fs.String("type", "", "compatibility alias for --topic")
+	topicFilter := fs.String("topic", "", "filter by topic when exporting from the list API")
+	cfg := addClientFlags(fs)
+	parseFlags(fs, args)
+
+	if *topicFilter != "" {
+		*typeFilter = *topicFilter
+	}
+	if *limit < 0 {
+		return cfg.fail(errors.New("export --limit must be >= 0"))
+	}
+	formatSet := flagWasSet(fs, "format")
+	if cfg.asJSON && *out == "" && !formatSet {
+		*format = "json"
+	}
+
+	opts := exportOptions{
+		Limit:      *limit,
+		TypeFilter: *typeFilter,
+		IDs:        fs.Args(),
+	}
+	items, err := collectExportItems(cfg, opts)
+	if err != nil {
+		return cfg.fail(err)
+	}
+
+	normalizedFormat, err := normalizeExportFormat(*format)
+	if err != nil {
+		return cfg.fail(err)
+	}
+	if *out == "" {
+		if err := writeExport(os.Stdout, normalizedFormat, items); err != nil {
+			return cfg.fail(err)
+		}
+		return nil
+	}
+
+	archive, err := writeExportFile(*out, normalizedFormat, items)
+	if err != nil {
+		return cfg.fail(err)
+	}
+	summary := exportSummary{
+		OK:     true,
+		Format: normalizedFormat,
+		Count:  len(items),
+		Out:    archive.Out,
+		Bytes:  archive.SizeBytes,
+		Server: strings.TrimRight(cfg.server, "/"),
+		Topic:  opts.TypeFilter,
+		IDs:    opts.IDs,
+	}
+	if cfg.asJSON {
+		writeJSONStdout(summary)
+		return nil
+	}
+	fmt.Printf("exported %d item(s) to %s (%s, %d bytes)\n", summary.Count, summary.Out, summary.Format, summary.Bytes)
+	return nil
+}
+
+type exportOptions struct {
+	Limit      int
+	TypeFilter string
+	IDs        []string
+}
+
+type exportSummary struct {
+	OK     bool     `json:"ok"`
+	Format string   `json:"format"`
+	Count  int      `json:"count"`
+	Out    string   `json:"out,omitempty"`
+	Bytes  int64    `json:"bytes,omitempty"`
+	Server string   `json:"server"`
+	Topic  string   `json:"topic,omitempty"`
+	IDs    []string `json:"ids,omitempty"`
+}
+
+type exportArchive struct {
+	Format string       `json:"format"`
+	Count  int          `json:"count"`
+	Items  []exportItem `json:"items"`
+}
+
+type exportFileResult struct {
+	Out       string
+	SizeBytes int64
+}
+
+type exportItem struct {
+	ID        string         `json:"id"`
+	Type      string         `json:"type"`
+	Title     string         `json:"title"`
+	Tags      []string       `json:"tags"`
+	Pinned    bool           `json:"pinned"`
+	Meta      map[string]any `json:"meta"`
+	Body      string         `json:"body"`
+	Raw       string         `json:"raw"`
+	CreatedAt time.Time      `json:"created_at"`
+}
+
+type exportListResponse struct {
+	Items []struct {
+		ID string `json:"id"`
+	} `json:"items"`
+}
+
+func collectExportItems(cfg *clientConfig, opts exportOptions) ([]exportItem, error) {
+	ids := opts.IDs
+	if len(ids) == 0 {
+		listed, err := listExportIDs(cfg, opts)
+		if err != nil {
+			return nil, err
+		}
+		ids = listed
+	}
+
+	items := make([]exportItem, 0, len(ids))
+	for _, id := range ids {
+		it, err := fetchExportItem(cfg, id)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *it)
+	}
+	return items, nil
+}
+
+func listExportIDs(cfg *clientConfig, opts exportOptions) ([]string, error) {
+	var ids []string
+	offset := 0
+	for {
+		pageLimit := exportPageSize
+		if opts.Limit > 0 {
+			remaining := opts.Limit - len(ids)
+			if remaining <= 0 {
+				break
+			}
+			if remaining < pageLimit {
+				pageLimit = remaining
+			}
+		}
+
+		url := fmt.Sprintf("%s?limit=%d&offset=%d", cfg.url("/api/items"), pageLimit, offset)
+		if opts.TypeFilter != "" {
+			url += "&type=" + neturl.QueryEscape(opts.TypeFilter)
+		}
+		resp, err := cfg.do(http.MethodGet, url, "", nil)
+		if err != nil {
+			return nil, fmt.Errorf("list export ids: %w", err)
+		}
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read export list response: %w", readErr)
+		}
+		if resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("list export ids failed (server %d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+
+		var page exportListResponse
+		if err := json.Unmarshal(body, &page); err != nil {
+			return nil, fmt.Errorf("decode export list response: %w", err)
+		}
+		for _, it := range page.Items {
+			if it.ID != "" {
+				ids = append(ids, it.ID)
+			}
+		}
+		if len(page.Items) < pageLimit {
+			break
+		}
+		offset += len(page.Items)
+	}
+	return ids, nil
+}
+
+func fetchExportItem(cfg *clientConfig, id string) (*exportItem, error) {
+	if strings.TrimSpace(id) == "" {
+		return nil, errors.New("export id must not be empty")
+	}
+	url := cfg.url("/api/items/" + neturl.PathEscape(id) + "?raw=1")
+	resp, err := cfg.do(http.MethodGet, url, "", nil)
+	if err != nil {
+		return nil, fmt.Errorf("fetch export item %s: %w", id, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read export item %s response: %w", id, err)
+	}
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("fetch export item %s failed (server %d): %s", id, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var item exportItem
+	if err := json.Unmarshal(body, &item); err != nil {
+		return nil, fmt.Errorf("decode export item %s: %w", id, err)
+	}
+	return &item, nil
+}
+
+func normalizeExportFormat(format string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "", "jsonl", "ndjson":
+		return "jsonl", nil
+	case "json":
+		return "json", nil
+	default:
+		return "", fmt.Errorf("unsupported export format %q (want jsonl or json)", format)
+	}
+}
+
+func writeExport(w io.Writer, format string, items []exportItem) error {
+	switch format {
+	case "jsonl":
+		enc := json.NewEncoder(w)
+		for _, it := range items {
+			if err := enc.Encode(it); err != nil {
+				return fmt.Errorf("write jsonl export: %w", err)
+			}
+		}
+	case "json":
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(exportArchive{Format: "json", Count: len(items), Items: items}); err != nil {
+			return fmt.Errorf("write json export: %w", err)
+		}
+	default:
+		return fmt.Errorf("unsupported export format %q", format)
+	}
+	return nil
+}
+
+func writeExportFile(outPath, format string, items []exportItem) (*exportFileResult, error) {
+	if strings.TrimSpace(outPath) == "" {
+		return nil, errors.New("export --out path must not be empty")
+	}
+	if dir := filepath.Dir(outPath); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create export parent directory %s: %w", dir, err)
+		}
+	}
+	f, err := os.OpenFile(outPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("export target %s already exists (refusing to overwrite; choose a new path)", outPath)
+		}
+		return nil, fmt.Errorf("create export target %s: %w", outPath, err)
+	}
+	writeErr := writeExport(f, format, items)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return nil, writeErr
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close export target %s: %w", outPath, closeErr)
+	}
+	absOut, _ := filepath.Abs(outPath)
+	res := &exportFileResult{Out: absOut}
+	if fi, err := os.Stat(outPath); err == nil {
+		res.SizeBytes = fi.Size()
+	}
+	return res, nil
+}
+
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	seen := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			seen = true
+		}
+	})
+	return seen
+}
+
 // --- pin/unpin ---
 
 func cmdPin(args []string, pinned bool) error {
@@ -449,6 +756,352 @@ func cmdDelete(args []string) error {
 	}
 	fmt.Printf("deleted %s\n", id)
 	return nil
+}
+
+// --- health ---
+
+func cmdHealth(args []string) error {
+	fs := flag.NewFlagSet("health", flag.ExitOnError)
+	cfg := addClientFlags(fs)
+	parseFlags(fs, args)
+	if fs.NArg() != 0 {
+		return cfg.fail(errors.New("usage: infowall health [--server URL] [--api-key KEY] [--json]"))
+	}
+
+	result, err := checkHealth(cfg)
+	if err != nil {
+		return cfg.fail(err)
+	}
+	if cfg.asJSON {
+		writeJSONStdout(result)
+		return nil
+	}
+	fmt.Printf("ok: %s (%d)\n", result.Server, result.HTTPStatus)
+	if result.ServiceStatus != "" {
+		fmt.Printf("status: %s\n", result.ServiceStatus)
+	}
+	if result.TS != "" {
+		fmt.Printf("server time: %s\n", result.TS)
+	}
+	return nil
+}
+
+type healthResult struct {
+	OK            bool   `json:"ok"`
+	Reachable     bool   `json:"reachable"`
+	Server        string `json:"server"`
+	HTTPStatus    int    `json:"http_status"`
+	Service       string `json:"service,omitempty"`
+	ServiceStatus string `json:"service_status,omitempty"`
+	Version       string `json:"version,omitempty"`
+	Commit        string `json:"commit,omitempty"`
+	TS            string `json:"ts,omitempty"`
+}
+
+type healthPayload struct {
+	OK      bool   `json:"ok"`
+	Service string `json:"service"`
+	Status  string `json:"status"`
+	TS      string `json:"ts"`
+}
+
+func checkHealth(cfg *clientConfig) (*healthResult, error) {
+	serverURL := strings.TrimRight(cfg.server, "/")
+	resp, err := cfg.do(http.MethodGet, cfg.url("/api/health"), "", nil)
+	if err != nil {
+		return nil, fmt.Errorf("health check %s: %w", serverURL, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read health response: %w", err)
+	}
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("health check %s failed (server %d): %s", serverURL, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var payload healthPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode health response: %w", err)
+	}
+	if !payload.OK {
+		return nil, fmt.Errorf("health check %s reported not ok", serverURL)
+	}
+
+	return &healthResult{
+		OK:            true,
+		Reachable:     true,
+		Server:        serverURL,
+		HTTPStatus:    resp.StatusCode,
+		Service:       payload.Service,
+		ServiceStatus: payload.Status,
+		Version:       version,
+		Commit:        commit,
+		TS:            payload.TS,
+	}, nil
+}
+
+// --- doctor ---
+
+func cmdDoctor(args []string) error {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	cfg := addClientFlags(fs)
+	parseFlags(fs, args)
+	if fs.NArg() != 0 {
+		return cfg.fail(errors.New("usage: infowall doctor [--server URL] [--api-key KEY] [--json]"))
+	}
+
+	health, err := checkHealth(cfg)
+	if err != nil {
+		return cfg.fail(fmt.Errorf("server health: %w", err))
+	}
+	auth, err := checkAuthRead(cfg)
+	if err != nil {
+		return cfg.fail(err)
+	}
+
+	result := doctorResult{
+		OK:        true,
+		Server:    strings.TrimRight(cfg.server, "/"),
+		Health:    *health,
+		Auth:      auth,
+		NextSteps: doctorNextSteps(),
+	}
+	if cfg.asJSON {
+		writeJSONStdout(result)
+		return nil
+	}
+
+	fmt.Printf("ok: %s\n", result.Server)
+	fmt.Printf("health: %s (%d)\n", health.ServiceStatus, health.HTTPStatus)
+	fmt.Printf("auth: %s (%d)\n", auth.Status, auth.HTTPStatus)
+	fmt.Println("next:")
+	for _, step := range result.NextSteps {
+		fmt.Printf("  - %s\n", step)
+	}
+	return nil
+}
+
+type doctorResult struct {
+	OK        bool             `json:"ok"`
+	Server    string           `json:"server"`
+	Health    healthResult     `json:"health"`
+	Auth      doctorAuthResult `json:"auth"`
+	NextSteps []string         `json:"next_steps"`
+}
+
+type doctorAuthResult struct {
+	OK             bool   `json:"ok"`
+	Checked        bool   `json:"checked"`
+	HTTPStatus     int    `json:"http_status,omitempty"`
+	Status         string `json:"status"`
+	Path           string `json:"path"`
+	APIKeyProvided bool   `json:"api_key_provided"`
+	Message        string `json:"message,omitempty"`
+}
+
+func checkAuthRead(cfg *clientConfig) (doctorAuthResult, error) {
+	serverURL := strings.TrimRight(cfg.server, "/")
+	res := doctorAuthResult{
+		Checked:        true,
+		Path:           "/api/items?limit=1",
+		APIKeyProvided: cfg.apiKey != "",
+	}
+
+	resp, err := cfg.do(http.MethodGet, cfg.url(res.Path), "", nil)
+	if err != nil {
+		res.Status = "unreachable"
+		return res, fmt.Errorf("auth check %s%s: %w", serverURL, res.Path, err)
+	}
+	defer resp.Body.Close()
+
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	res.HTTPStatus = resp.StatusCode
+
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		res.OK = true
+		res.Status = "ok"
+		res.Message = "read API accepted configured credentials"
+		return res, nil
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		res.Status = "unauthorized"
+		res.Message = "read API rejected configured credentials"
+		return res, fmt.Errorf("auth check %s%s failed: server %d unauthorized", serverURL, res.Path, resp.StatusCode)
+	case resp.StatusCode >= 300:
+		res.Status = "api_error"
+		res.Message = "read API returned a non-success status"
+		return res, fmt.Errorf("auth check %s%s failed: server %d", serverURL, res.Path, resp.StatusCode)
+	default:
+		res.Status = "unexpected"
+		return res, fmt.Errorf("auth check %s%s returned unexpected status %d", serverURL, res.Path, resp.StatusCode)
+	}
+}
+
+func doctorNextSteps() []string {
+	return []string{
+		"Verify the local DB with `infowall db info --db <path> --json`.",
+		"Back up the local DB with `infowall db backup --db <path> --out <backup.db> --json`.",
+		"See README formal local operation sections for startup, always-on service, backup, and restore guidance.",
+	}
+}
+
+// --- db (local SQLite persistence: info + backup) ---
+
+// cmdDB dispatches the local database subcommands. These operate directly on the
+// SQLite file (via --db / INFOWALL_DB), not over HTTP, so they work whether or
+// not a server is running.
+func cmdDB(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: infowall db <info|backup> [flags]")
+	}
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "info":
+		return cmdDBInfo(rest)
+	case "backup":
+		return cmdDBBackup(rest)
+	case "-h", "--help", "help":
+		fmt.Println(`infowall db — local SQLite persistence
+
+Usage:
+  infowall db info   [--db PATH] [--json]
+  infowall db backup --out PATH [--db PATH] [--json]
+
+Both operate on the local database file (--db, or INFOWALL_DB, default
+infowall.db); they do not talk to a running server. backup uses SQLite
+VACUUM INTO, which is safe to run while the server is live.`)
+		return nil
+	default:
+		return fmt.Errorf("unknown db subcommand %q (want info or backup)", sub)
+	}
+}
+
+// dbInfo is the machine-readable result of `infowall db info`.
+type dbInfo struct {
+	Path        string `json:"path"`        // absolute, resolved path
+	Exists      bool   `json:"exists"`      // does the main DB file exist?
+	SizeBytes   int64  `json:"size_bytes"`  // size of the main DB file (0 if absent)
+	WAL         bool   `json:"wal"`         // is a -wal sidecar present?
+	SHM         bool   `json:"shm"`         // is a -shm sidecar present?
+	Items       int64  `json:"items"`       // row count in items table
+	Initialized bool   `json:"initialized"` // schema present / openable
+	APIKeySet   bool   `json:"api_key_set"` // is INFOWALL_API_KEY configured?
+}
+
+func cmdDBInfo(args []string) error {
+	fs := flag.NewFlagSet("db info", flag.ExitOnError)
+	dbPath := fs.String("db", envOr("INFOWALL_DB", "infowall.db"), "SQLite database path")
+	asJSON := fs.Bool("json", false, "output machine-readable JSON")
+	parseFlags(fs, args)
+
+	info, err := collectDBInfo(*dbPath)
+	if err != nil {
+		return failLocal(*asJSON, err)
+	}
+	if *asJSON {
+		writeJSONStdout(info)
+		return nil
+	}
+	fmt.Printf("path:        %s\n", info.Path)
+	fmt.Printf("exists:      %v\n", info.Exists)
+	fmt.Printf("size:        %d bytes\n", info.SizeBytes)
+	fmt.Printf("wal/shm:     %v / %v\n", info.WAL, info.SHM)
+	fmt.Printf("items:       %d\n", info.Items)
+	fmt.Printf("initialized: %v\n", info.Initialized)
+	fmt.Printf("api key set: %v\n", info.APIKeySet)
+	return nil
+}
+
+// collectDBInfo gathers status about the local DB file. Opening the store also
+// initializes the schema (CREATE TABLE IF NOT EXISTS) — matching what `serve`
+// would do — so `db info` on a fresh path reports a usable, initialized DB.
+func collectDBInfo(dbPath string) (*dbInfo, error) {
+	abs, err := filepath.Abs(dbPath)
+	if err != nil {
+		abs = dbPath
+	}
+	info := &dbInfo{Path: abs, APIKeySet: os.Getenv("INFOWALL_API_KEY") != ""}
+
+	st, err := store.Open(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer st.Close()
+	info.Initialized = true
+
+	n, err := st.Count(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("count items in %s: %w", abs, err)
+	}
+	info.Items = n
+
+	if fi, err := os.Stat(dbPath); err == nil {
+		info.Exists = true
+		info.SizeBytes = fi.Size()
+	}
+	if _, err := os.Stat(dbPath + "-wal"); err == nil {
+		info.WAL = true
+	}
+	if _, err := os.Stat(dbPath + "-shm"); err == nil {
+		info.SHM = true
+	}
+	return info, nil
+}
+
+// dbBackupResult is the machine-readable result of `infowall db backup`.
+type dbBackupResult struct {
+	Source    string `json:"source"`     // resolved source DB path
+	Out       string `json:"out"`        // resolved backup path
+	SizeBytes int64  `json:"size_bytes"` // size of the written backup
+}
+
+func cmdDBBackup(args []string) error {
+	fs := flag.NewFlagSet("db backup", flag.ExitOnError)
+	dbPath := fs.String("db", envOr("INFOWALL_DB", "infowall.db"), "SQLite database path to back up")
+	out := fs.String("out", "", "destination path for the backup (required; must not exist)")
+	asJSON := fs.Bool("json", false, "output machine-readable JSON")
+	parseFlags(fs, args)
+
+	if *out == "" {
+		return failLocal(*asJSON, errors.New("usage: infowall db backup --out PATH [--db PATH] [--json]"))
+	}
+
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		return failLocal(*asJSON, err)
+	}
+	defer st.Close()
+
+	if err := st.Backup(context.Background(), *out); err != nil {
+		return failLocal(*asJSON, err)
+	}
+
+	absSrc, _ := filepath.Abs(*dbPath)
+	absOut, _ := filepath.Abs(*out)
+	res := &dbBackupResult{Source: absSrc, Out: absOut}
+	if fi, err := os.Stat(*out); err == nil {
+		res.SizeBytes = fi.Size()
+	}
+	if *asJSON {
+		writeJSONStdout(res)
+		return nil
+	}
+	fmt.Printf("backed up %s → %s (%d bytes)\n", res.Source, res.Out, res.SizeBytes)
+	return nil
+}
+
+// failLocal emits an error for the local (non-HTTP) db commands using the same
+// contract as clientConfig.fail: JSON {"error":...} on stderr in --json mode,
+// otherwise a plain returned error. Either way the process exits non-zero.
+func failLocal(asJSON bool, err error) error {
+	if asJSON {
+		json.NewEncoder(os.Stderr).Encode(map[string]string{"error": err.Error()})
+		return errEmitted{err}
+	}
+	return err
 }
 
 // --- client config & shared HTTP helpers ---

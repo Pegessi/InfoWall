@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.example.infowall</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/infowall</string>
+    <string>serve</string>
+    <string>--addr</string>
+    <string>127.0.0.1:8899</string>
+    <string>--db</string>
+    <string>/ABSOLUTE/PATH/TO/infowall.db</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>INFOWALL_API_KEY</key>
+    <string>REPLACE_WITH_A_LONG_RANDOM_LOCAL_SECRET</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/ABSOLUTE/PATH/TO/WORKING/DIRECTORY</string>
+
+  <key>StandardOutPath</key>
+  <string>/ABSOLUTE/PATH/TO/logs/infowall.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/ABSOLUTE/PATH/TO/logs/infowall.err.log</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
