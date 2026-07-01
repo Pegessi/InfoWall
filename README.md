@@ -32,7 +32,8 @@ echo "# hello world" | ./bin/infowall push -
 ```
 
 Open <http://localhost:8899> in a browser. New items appear live without a
-page refresh.
+page refresh. On a fresh empty wall, the app shows compact copyable commands
+for `infowall health --json` and the first markdown push.
 
 The browser groups same-topic items into topic panels by default: links, notes,
 papers, images, and charts each get their own fixed-height panel with the
@@ -45,6 +46,248 @@ feed by itself for focused reading.
 
 ---
 
+## Formal local operation: go-live checklist
+
+A single pass to confirm a local deployment is ready. Each step links to the
+detailed section below — this list only sequences them.
+
+1. **Build the binary**: `make build` (embeds the frontend into `bin/infowall`).
+2. **Choose fixed paths/secret**: pin `--db`/`INFOWALL_DB`, `--addr`, and
+   `INFOWALL_API_KEY`. See [always-on service](#formal-local-operation-always-on-service).
+3. **Start & verify health**: run `serve`, then
+   [`infowall health --json`](#formal-local-operation-startup-verification).
+4. **Run the diagnostic**: [`infowall doctor --json`](#doctor) confirms health
+   plus that the API key reads the protected API.
+5. **Confirm the database**: [`infowall db info --json`](#db-info--db-backup)
+   shows the active path, item count, and WAL state.
+6. **Take a restore point**:
+   [`infowall db backup --out <path>`](#db-info--db-backup); know the
+   restore-by-copy steps in
+   [data persistence & backup](#formal-local-operation-data-persistence--backup).
+7. **Optional archive**: [`infowall export --out <path>`](#export) for an
+   audit/migration copy (separate from a DB backup).
+8. **Open the wall**: load the browser, confirm the live connection indicator
+   reads **Live**, and that search/filter and the two-step
+   [delete](#pin--unpin--delete) guard behave.
+9. **Optional always-on**: install the launchd template only when you want the
+   service to survive restarts — see
+   [always-on service](#formal-local-operation-always-on-service).
+
+Everything is **local-only** (no cloud, accounts, or remote sync); durability is
+your filesystem plus the backups you take.
+
+---
+
+## Formal local operation: startup verification
+
+For day-to-day local operation, start the server and verify it from a second
+terminal before pushing data or opening the wall:
+
+```bash
+# Terminal 1: start the local service
+./bin/infowall serve --addr :8899 --db infowall.db
+
+# Terminal 2: verify the configured endpoint
+./bin/infowall health --server http://localhost:8899 --json
+```
+
+Expected JSON is intentionally small and safe:
+
+```json
+{
+  "ok": true,
+  "reachable": true,
+  "server": "http://localhost:8899",
+  "http_status": 200,
+  "service": "infowall",
+  "service_status": "ok",
+  "version": "dev",
+  "commit": "none",
+  "ts": "2026-07-01T00:00:00Z"
+}
+```
+
+`infowall health` reads `INFOWALL_URL` unless `--server` is passed, exits
+non-zero on network errors or non-2xx responses, and in `--json` mode writes
+`{"error": "..."}` to stderr on failure. The underlying `GET /api/health`
+endpoint is read-only and does not require an API key, even when the server was
+started with `--api-key`.
+
+For one repeatable local diagnostic, use `doctor`. It checks health first, then
+performs a read-only authenticated `GET /api/items?limit=1` probe to confirm the
+configured API key can access protected API paths. It does not write items,
+touch the DB file, or create backups:
+
+```bash
+./bin/infowall doctor --server http://localhost:8899 --api-key "$INFOWALL_API_KEY" --json
+```
+
+Troubleshooting:
+
+- **Wrong URL**: check `INFOWALL_URL` and any `--server` override. Flags take
+  precedence over environment variables.
+- **Server down**: start `./bin/infowall serve --addr :8899 --db infowall.db`
+  and make sure the listen address matches the health command.
+- **API key confusion**: health is intentionally unauthenticated. If health
+  passes but `doctor` reports `server 401`, set `INFOWALL_API_KEY` or pass
+  `--api-key` to protected API commands.
+
+---
+
+## Formal local operation: always-on service
+
+For formal daily use, keep the same binary, DB path, and API key every time the
+machine restarts. Choose those values once, then verify the service after every
+start/restart:
+
+```bash
+export INFOWALL_URL=http://127.0.0.1:8899
+export INFOWALL_DB="$HOME/Library/Application Support/infowall/infowall.db"
+export INFOWALL_API_KEY=replace-with-a-long-random-local-secret
+mkdir -p "$HOME/Library/Application Support/infowall" "$HOME/Library/Logs/infowall"
+
+./bin/infowall serve --addr 127.0.0.1:8899 --db "$INFOWALL_DB" \
+  --api-key "$INFOWALL_API_KEY"
+
+./bin/infowall health --server "$INFOWALL_URL" --json
+./bin/infowall doctor --server "$INFOWALL_URL" --api-key "$INFOWALL_API_KEY" --json
+./bin/infowall db info --db "$INFOWALL_DB" --json
+```
+
+Keep `--addr` on `127.0.0.1:8899` for a private laptop-only wall. Binding to
+`0.0.0.0` or a LAN address exposes the wall to other devices; do that only when
+intended, and always keep `INFOWALL_API_KEY`/`--api-key` set. Logs are written
+to stdout/stderr, so run the command from a terminal during manual checks or
+send those streams to files when using a service manager.
+
+On macOS, use [`examples/launchd/com.example.infowall.plist`](examples/launchd/com.example.infowall.plist)
+as a template if you want launchd to keep the service running. The template is
+not installed by Infowall and contains placeholders only. Copy it to
+`~/Library/LaunchAgents/`, replace every placeholder path/secret with local
+values, keep the copied file private (`chmod 600`), then lint and load your
+copy:
+
+```bash
+mkdir -p "$HOME/Library/Application Support/infowall" "$HOME/Library/Logs/infowall"
+plutil -lint ~/Library/LaunchAgents/com.example.infowall.plist
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.example.infowall.plist
+launchctl kickstart -k "gui/$(id -u)/com.example.infowall"
+
+./bin/infowall health --server http://127.0.0.1:8899 --json
+./bin/infowall doctor --server http://127.0.0.1:8899 --api-key "$INFOWALL_API_KEY" --json
+./bin/infowall db info --db "$HOME/Library/Application Support/infowall/infowall.db" --json
+```
+
+Stop and restart the local service with launchd when you need to verify a fresh
+start:
+
+```bash
+launchctl bootout "gui/$(id -u)/com.example.infowall"
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.example.infowall.plist
+launchctl kickstart -k "gui/$(id -u)/com.example.infowall"
+./bin/infowall health --server http://127.0.0.1:8899 --json
+```
+
+Check the log paths from your copied plist when health fails, then use the
+startup verification and data persistence sections above/below to confirm the
+URL, API key, DB path, and backup/restore state.
+
+---
+
+## Formal local operation: data persistence & backup
+
+Infowall stores everything in a single local SQLite database. For a formal
+single-machine run, treat that file as the source of truth and back it up on a
+schedule you control. Everything here is intentionally **local-only**: there is
+no cloud sync, no remote/offsite backup service, no accounts, and no
+multi-device data model. Durability is your filesystem plus the backups you take.
+
+**1. Pin the DB path explicitly.** Always pass `--db` (or set `INFOWALL_DB`) so
+the database does not depend on the current working directory:
+
+```bash
+./bin/infowall serve --addr :8899 --db /srv/infowall/infowall.db
+```
+
+A nested path is handled deliberately: the parent directory is created if it is
+missing. If the path is unusable (e.g. it points at a directory, or a parent
+component is a regular file) the server fails at startup with an error naming
+the offending path — it never silently falls back to a temp or in-memory
+database, so you cannot accidentally serve from throwaway storage.
+
+The database carries a schema version (SQLite `PRAGMA user_version`). Databases
+from earlier releases open and migrate forward automatically with no data loss.
+A database written by a **newer** infowall than the one you are running is
+rejected at startup with a clear error (it is left unchanged) — upgrade the
+binary or restore a compatible backup rather than risk a downgrade.
+
+**2. Set an API key if the wall is reachable by anyone else.** With
+`--api-key`/`INFOWALL_API_KEY` set, all writes and the SSE stream require the
+token; only `GET /api/health` stays open. The `db` commands operate on the file
+directly and do not need the key.
+
+**3. Inspect the active database.**
+
+```bash
+./bin/infowall db info --db /srv/infowall/infowall.db --json
+```
+
+Reports the absolute path, file size, WAL/SHM sidecar presence, item count, and
+whether the schema is initialized — a quick way for an operator or agent to
+confirm which file is live and that it is healthy.
+
+**4. Back up safely, even while serving.**
+
+```bash
+./bin/infowall db backup --db /srv/infowall/infowall.db \
+  --out /srv/infowall/backups/infowall-$(date +%F-%H%M).db --json
+```
+
+`db backup` uses SQLite `VACUUM INTO`, which is consistent against a live,
+WAL-mode database. Prefer it over `cp infowall.db backup.db`: a plain copy of a
+running WAL database can miss un-checkpointed pages in the `-wal` sidecar and
+produce a torn backup. The command refuses to overwrite an existing `--out`
+file, so give each backup a unique name (e.g. a timestamp) and rotate/retain
+them with your own tooling (cron + `find -mtime`, etc.).
+
+**5. Export portable item archives when you need audit/migration data.**
+SQLite backups are the right tool for full restore. `infowall export` is a
+read-only API export for portable archives: it writes JSON Lines or JSON with
+each item's id, topic/type, title, tags, pinned state, timestamps, body, raw
+markdown source, and metadata such as URL/image/chart fields.
+
+```bash
+./bin/infowall export --server http://localhost:8899 \
+  --api-key "$INFOWALL_API_KEY" --out /srv/infowall/exports/items-$(date +%F).jsonl --json
+
+# selected items or a single topic:
+./bin/infowall export <id-1> <id-2> --out selected-items.jsonl --json
+./bin/infowall export --topic paper --format json --out paper-items.json --json
+```
+
+**6. Restore by copying a backup into place (no destructive CLI command).**
+Restore is a deliberate manual step:
+
+```bash
+# 1. Stop the server (Ctrl-C / your service manager) so nothing is writing.
+# 2. Move the current files aside, including any WAL/SHM sidecars:
+mv /srv/infowall/infowall.db     /srv/infowall/infowall.db.old      2>/dev/null || true
+mv /srv/infowall/infowall.db-wal /srv/infowall/infowall.db-wal.old  2>/dev/null || true
+mv /srv/infowall/infowall.db-shm /srv/infowall/infowall.db-shm.old  2>/dev/null || true
+# 3. Copy the chosen backup into the live path:
+cp /srv/infowall/backups/infowall-2026-07-01-0900.db /srv/infowall/infowall.db
+# 4. Start the server again and verify:
+./bin/infowall serve --addr :8899 --db /srv/infowall/infowall.db &
+./bin/infowall db info --db /srv/infowall/infowall.db --json
+```
+
+A `VACUUM INTO` backup is a fully self-contained database with no sidecar files,
+so copying just the single backup file is sufficient. There is intentionally no
+`db restore` command — overwriting the live database is high-risk, so it is left
+as an explicit, reviewable manual step.
+
+---
+
 ## CLI reference
 
 ```
@@ -52,9 +295,14 @@ infowall serve    [--addr :8899] [--db infowall.db] [--dev] [--api-key KEY]
 infowall push     [file|- ...] [-t/--topic TOPIC] [--type TYPE] [--pin] [--server URL] [--api-key KEY] [--json]
 infowall list     [--limit N] [--topic TOPIC] [--type TYPE] [--server URL] [--api-key KEY] [--json]
 infowall get      <id> [--raw] [--server URL] [--api-key KEY] [--json]
+infowall export   [id ...] [--format jsonl|json] [--out PATH] [--limit N] [--topic TOPIC] [--type TYPE] [--server URL] [--api-key KEY] [--json]
 infowall pin      <id> [--server URL] [--api-key KEY] [--json]
 infowall unpin    <id> [--server URL] [--api-key KEY] [--json]
 infowall delete   <id> [--yes] [--server URL] [--api-key KEY] [--json]
+infowall health   [--server URL] [--api-key KEY] [--json]
+infowall doctor   [--server URL] [--api-key KEY] [--json]
+infowall db info   [--db infowall.db] [--json]
+infowall db backup --out PATH [--db infowall.db] [--json]
 infowall version
 ```
 
@@ -63,6 +311,11 @@ Every command that talks to the server accepts `--server`, `--api-key`, and
 variables (flags take precedence). Flags may appear before or after positional
 arguments. See [Agent / scripting usage](#agent--scripting-usage) for the JSON
 output and exit-code contract.
+
+The `db` subcommands are different: they operate **directly on the local SQLite
+file** (`--db`, or `INFOWALL_DB`, default `infowall.db`) rather than over HTTP,
+so they work whether or not a server is running. They still follow the same
+JSON/stderr/exit-code contract.
 
 ### `serve`
 
@@ -74,6 +327,60 @@ Starts the HTTP + SSE server.
 | `--db`       | `infowall.db`        | SQLite database path                          |
 | `--dev`      | `false`              | Proxy `/` to the Vite dev server on `:5173`   |
 | `--api-key`  | *(none)*             | If set, all writes and SSE require this token |
+
+### `health`
+
+Checks the configured server's `GET /api/health` endpoint. It uses
+`INFOWALL_URL` by default, or `--server` when provided. `--json` prints a
+structured success object to stdout and writes a structured error to stderr on
+failure.
+
+```bash
+./bin/infowall health --json
+INFOWALL_URL=http://localhost:8899 ./bin/infowall health --json
+```
+
+### `doctor`
+
+Runs a read-only local operation diagnostic using the same `INFOWALL_URL`,
+`INFOWALL_API_KEY`, `--server`, `--api-key`, and `--json` conventions as the
+other server-talking commands. It first verifies `GET /api/health`, then checks
+that the configured API key can read the protected API with
+`GET /api/items?limit=1`.
+
+`doctor --json` prints a compact summary with health, auth/read-check status,
+and next-step commands for DB info and backup verification. It exits non-zero
+with a JSON error on stderr when the server is down/unhealthy or when protected
+API paths reject the configured key.
+
+```bash
+./bin/infowall doctor --json
+./bin/infowall doctor --server http://localhost:8899 --api-key "$INFOWALL_API_KEY" --json
+```
+
+### `db info` / `db backup`
+
+Local SQLite persistence commands. They act on the database **file** (`--db`, or
+`INFOWALL_DB`, default `infowall.db`), not a running server.
+
+`db info` reports the resolved (absolute) DB path, whether the file exists, its
+size, whether the `-wal` / `-shm` sidecar files are present, the item count, and
+whether the schema is initialized. Opening the DB initializes the schema if the
+file is new (the same thing `serve` does), so `db info` on a fresh path reports
+an initialized, empty database.
+
+`db backup --out PATH` writes a consistent snapshot using SQLite `VACUUM INTO`.
+This is safe to run **while the server is live** — it takes a read transaction
+and writes a fully-checkpointed, defragmented copy, so it does not miss
+un-checkpointed WAL pages the way a raw `cp` of the `.db` file can. It refuses to
+overwrite an existing `--out` file and creates the destination's parent
+directory if needed.
+
+```bash
+./bin/infowall db info --json
+./bin/infowall db info --db /srv/infowall/infowall.db --json
+./bin/infowall db backup --out backups/wall-$(date +%F).db --json
+```
 
 ### `push`
 
@@ -106,8 +413,8 @@ if **any** source failed.
 ### `list`
 
 Print recent items in a tabular view. Use `--json` for the raw server JSON
-(the full item objects). `--topic` filters the feed server-side; `--type` is a
-compatibility alias.
+(the full item objects plus pagination metadata). `--topic` filters the feed
+server-side; `--type` is a compatibility alias.
 
 ### `get`
 
@@ -115,6 +422,29 @@ Fetch a single item by id. Prints a readable summary plus the rendered body, or
 the full item JSON with `--json`. Pass `--raw` to include the original markdown
 source (the rendered/`--json` body otherwise omits it). A missing id exits
 non-zero.
+
+### `export`
+
+Read-only portable item archive from the running service. With no positional
+ids, `export` pages through `GET /api/items` and then fetches each item with
+`GET /api/items/{id}?raw=1`; with positional ids, it exports exactly those ids
+in the order given. It never writes to the SQLite database or backup files.
+
+Default output is JSON Lines on stdout, one full item per line. Use
+`--out PATH` to write the archive to a file; existing files are refused so an
+operator does not accidentally overwrite an archive. `--format json` writes one
+JSON object with `format`, `count`, and `items`. `--json` keeps JSON errors on
+stderr and, when used without `--out`, defaults to the JSON object format; when
+used with `--out`, stdout is a compact summary of the file written.
+
+```bash
+./bin/infowall export --out archive.jsonl --json
+./bin/infowall export --topic paper --format json --out papers.json --json
+./bin/infowall export <id-1> <id-2> --out selected.jsonl --json
+```
+
+Use `export` for audit, migration, or external archival workflows. Use
+`db backup` for a complete SQLite restore point.
 
 ### `pin` / `unpin` / `delete`
 
@@ -129,7 +459,9 @@ The CLI is designed to be driven by scripts and agents:
 - **`--json` everywhere.** `push` prints an array of per-source result objects
   (`source`, `id`, `type`, `title`, or `error`); `type` is the JSON field that
   stores the item's topic for API compatibility. `list` / `get` / `pin` /
-  `unpin` echo the server's JSON; `delete` prints `{"id", "deleted"}`.
+  `unpin` echo the server's JSON; `export` prints JSON Lines or a JSON export
+  object; `delete` prints `{"id", "deleted"}`; `health` and `doctor` print
+  compact diagnostic objects.
 - **Structured errors.** In `--json` mode a failure writes
   `{"error": "..."}` to **stderr** and leaves stdout clean.
 - **Exit codes.** Any failure (network error, non-2xx response, missing id,
@@ -143,6 +475,9 @@ ids=$(infowall push docs/*.md --json | jq -r '.[].id')
 
 # fetch an item's raw markdown back out
 infowall get "$id" --raw --json | jq -r '.raw'
+
+# archive all current items without mutating the service
+infowall export --out archive.jsonl --json
 ```
 
 ---
@@ -267,17 +602,46 @@ All POST bodies accept `text/markdown` (raw markdown bytes), `text/plain`, or
 
 | Method | Path                              | Description                              |
 |--------|-----------------------------------|------------------------------------------|
-| GET    | `/api/health`                     | `{"ok": true, "ts": "..."}`              |
-| GET    | `/api/items?limit=50&offset=0&topic=paper` | List items (newest first); `type=paper` also works |
+| GET    | `/api/health`                     | Safe unauthenticated health JSON         |
+| GET    | `/api/items?limit=50&offset=0&topic=paper` | List items (newest first); `type=paper` also works; `q=` full-text search, `pinned=1` pinned-only |
 | GET    | `/api/items/{id}?raw=1`           | Fetch one item (`raw=1` includes source) |
 | POST   | `/api/items`                      | Create an item                           |
 | POST   | `/api/items/{id}/pin?pinned=1`    | Pin/unpin an item                        |
 | DELETE | `/api/items/{id}`                 | Delete an item                           |
 | GET    | `/events`                         | Server-Sent Events stream                |
 
-When `INFOWALL_API_KEY` / `--api-key` is set, requests must carry either
-`Authorization: Bearer <key>` or `?key=<key>` as a query parameter (for
-EventSource, which cannot set headers).
+`GET /api/health` is intentionally unauthenticated and safe for local startup
+checks. When `INFOWALL_API_KEY` / `--api-key` is set, other API requests and
+the SSE stream must carry either `Authorization: Bearer <key>` or `?key=<key>`
+as a query parameter (for EventSource, which cannot set headers).
+
+`GET /api/items` is bounded: `limit` is clamped to `1..200` and defaults to 50.
+Offset pagination remains supported for existing clients. Newer clients can use
+the opaque `cursor` returned as `next_cursor` for stable incremental history
+loading:
+
+```json
+{
+  "items": [{ "id": "...", "type": "note", "title": "..." }],
+  "has_more": true,
+  "next_cursor": "opaque"
+}
+```
+
+Search and filtering are applied server-side over the **full history**, not just
+the loaded page. Optional query params compose with each other and with
+`cursor`/`offset` pagination and topic panels:
+
+- `q=<text>` — case-insensitive full-text search. Each whitespace-separated
+  term must match somewhere in the title, body, type, tags, or meta (terms are
+  AND-ed); `%`/`_` in a term are matched literally.
+- `type=` / `topic=` — restrict to one content type.
+- `pinned=1` — pinned items only.
+
+Omitting these params returns the same results as before (fully
+backward-compatible). The browser search/filter controls drive these params, so
+typing a query searches the entire local database; **Load more** pages the
+active filtered query.
 
 ---
 
@@ -317,7 +681,7 @@ curl -sN http://localhost:8899/events
 | `INFOWALL_URL`     | `http://localhost:8899`  | CLI        | Server base URL for push/list      |
 | `INFOWALL_API_KEY` | *(unset)*                | CLI/server | Shared secret for API auth          |
 | `INFOWALL_ADDR`    | `:8899`                  | `serve`    | Listen address (overridden by --addr)|
-| `INFOWALL_DB`      | `infowall.db`            | `serve`    | SQLite path (overridden by --db)   |
+| `INFOWALL_DB`      | `infowall.db`            | `serve`, `db` | SQLite path (overridden by --db)   |
 
 CLI flags take precedence over environment variables.
 
