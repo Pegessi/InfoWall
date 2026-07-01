@@ -7,6 +7,17 @@
 
 ---
 
+**⚠️ RULE #1 — DO NOT DEVELOP DIRECTLY ON `main`. ⚠️**
+
+Every feature, bug fix, UI change, test, doc update, and working-log addition
+**must** use an isolated worktree on a feature branch. No exceptions. This is
+the single most important rule in this document. See
+[Mandatory Workflow](#mandatory-workflow). This convention is aligned with the
+`claude_hub` project so agents moving between the two projects behave
+consistently.
+
+---
+
 ## Project
 
 infowall is a single-binary personal information wall: a feed of markdown cards
@@ -32,6 +43,50 @@ shapes) read [`README.md`](README.md). This guide is for people and agents
 
 The production binary embeds the built frontend (`cmd/infowall/dist`), so a
 release is a single ~12MB file with no runtime dependencies.
+
+## Mandatory Workflow
+
+**This workflow is mandatory. Do not skip steps. Do not take shortcuts.**
+
+For all feature work, bug fixes, UI changes, tests, documentation changes, and
+working-log additions — even small ones:
+
+1. Start from clean `main`: `git status` in the main worktree must be clean
+   (no modified / untracked source files). If you discover in-flight work on
+   `main`, do not pile on top of it — stop, ask the user how to proceed
+   (stash, move to a branch, or commit), then continue on a worktree.
+2. Create an isolated worktree and branch:
+   `git worktree add ../infowall-<slug> -b feat/<slug> main`
+   (use `fix/<slug>` for bug fixes, `docs/<slug>` for doc-only, `chore/<slug>`
+   for tooling/build). The worktree must live **outside** the main repo
+   directory (sibling) so the main worktree never has dirty source files.
+3. **Work only inside that task worktree.** Never edit source files in the
+   `main` worktree directly. Running `go test ./...` / `npm run lint` inside
+   the worktree is fine — build artifacts (`bin/`, `web/dist`,
+   `cmd/infowall/dist`) are git-ignored and may appear in the worktree.
+4. For frontend changes, run the Vite dev server from that worktree on its
+   own port (or the default :5173 if no conflict); stop it before merging.
+5. Commit changes with conventional commits (`feat:`, `fix:`, `docs:`,
+   `refactor:`, `test:`, `chore:`). Group related changes; one feature = one
+   branch (multiple commits within a branch are fine).
+6. Run validation appropriate to the touched files (see Development Workflow
+   below — at minimum `go vet ./...` + `go test ./...` for Go changes,
+   `npm run lint` + `npm run build` for frontend changes, and a smoke test
+   of the rebuilt binary for behavior changes).
+7. Add a working log under `docs/working-logs/YYYY-MM-DD-<slug>.md` for
+   non-trivial changes (see Working Logs). Update `README.md` when
+   user-facing behavior changes.
+8. **Merge into `main` only after validation and explicit user approval.**
+   Never merge to `main` autonomously. After merge, pull the main worktree
+   and delete the worktree (`git worktree remove -f ../infowall-<slug>`).
+
+A user request to "merge" / "commit to main" / "push" means complete this
+branch-to-main flow. It is not permission to skip the worktree branch.
+
+If you catch yourself writing code on `main`, stop immediately. Stash the
+changes, create a worktree, apply the stash there (`git stash pop` inside the
+worktree), and continue. Do not commit directly on `main` unless explicitly
+instructed to do so in a throwaway/experimental context.
 
 ## Commands
 
@@ -80,9 +135,9 @@ infowall is a small project; the workflow is intentionally lightweight.
    behavior (CLI, API, content types, env vars) changes, and add a working log
    under `docs/working-logs/` for non-trivial design work.
 
-If this project is later put under git, prefer a feature branch over committing
-directly to the default branch, and use conventional commit messages
-(`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`).
+Use conventional commit messages (`feat:`, `fix:`, `docs:`, `refactor:`,
+`test:`, `chore:`). All work must follow the worktree/branch rule above — see
+[Mandatory Workflow](#mandatory-workflow).
 
 ## Project Map
 
@@ -181,6 +236,9 @@ git-ignored — do not commit them.
 
 ## Pitfalls
 
+- **No direct work on `main`**: always create a worktree + feature branch first.
+  Even small fixes and doc changes go through a worktree. See
+  [Mandatory Workflow](#mandatory-workflow). This is RULE #1.
 - **Dev vs. embedded frontend**: production builds embed `cmd/infowall/dist`
   through `dist_prod.go` (`//go:build !dev`). Building or running with
   `-tags dev` switches to `dist_dev.go`, which serves nothing — you **must**
