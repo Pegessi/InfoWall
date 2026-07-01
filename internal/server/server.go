@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,7 +49,7 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 	}
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open database %s: %w", cfg.DBPath, err)
 	}
 	s := &Server{
 		cfg:   cfg,
@@ -71,7 +72,7 @@ func (s *Server) Close() error {
 func (s *Server) routes() {
 	api := chain(s.logRequest, s.auth)
 
-	s.mux.HandleFunc("GET /api/health", api(s.handleHealth))
+	s.mux.HandleFunc("GET /api/health", s.logRequest(s.handleHealth))
 	s.mux.HandleFunc("GET /api/items", api(s.handleListItems))
 	s.mux.HandleFunc("GET /api/items/{id}", api(s.handleGetItem))
 	s.mux.HandleFunc("POST /api/items", api(s.handleCreateItem))
@@ -135,7 +136,12 @@ func (s *Server) ListenAndServe() error {
 // --- handlers ---
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "ts": time.Now().UTC()})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"service": "infowall",
+		"status":  "ok",
+		"ts":      time.Now().UTC(),
+	})
 }
 
 func (s *Server) handleListItems(w http.ResponseWriter, r *http.Request) {
@@ -146,18 +152,47 @@ func (s *Server) handleListItems(w http.ResponseWriter, r *http.Request) {
 	if typeFilter == "" {
 		typeFilter = strings.TrimSpace(q.Get("topic"))
 	}
+	query := strings.TrimSpace(q.Get("q"))
+	pinnedOnly := false
+	if v := strings.TrimSpace(q.Get("pinned")); v != "" {
+		pinnedOnly = v == "1" || strings.EqualFold(v, "true")
+	}
 
-	items, err := s.store.List(r.Context(), limit, offset, typeFilter)
+	var cursor *store.ListCursor
+	if rawCursor := strings.TrimSpace(q.Get("cursor")); rawCursor != "" {
+		decoded, err := decodeListCursor(rawCursor)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err)
+			return
+		}
+		cursor = decoded
+	}
+
+	page, err := s.store.ListPage(r.Context(), store.ListOptions{
+		Limit:      limit,
+		Offset:     offset,
+		TypeFilter: typeFilter,
+		Query:      query,
+		PinnedOnly: pinnedOnly,
+		After:      cursor,
+	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	if q.Get("raw") != "1" {
-		for _, it := range items {
+		for _, it := range page.Items {
 			it.Raw = ""
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	payload := map[string]any{
+		"items":    page.Items,
+		"has_more": page.HasMore,
+	}
+	if page.NextCursor != nil {
+		payload["next_cursor"] = encodeListCursor(page.NextCursor)
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 // handleGetItem returns a single item by id. The raw markdown source is included
@@ -177,6 +212,45 @@ func (s *Server) handleGetItem(w http.ResponseWriter, r *http.Request) {
 		it.Raw = ""
 	}
 	writeJSON(w, http.StatusOK, it)
+}
+
+type listCursorPayload struct {
+	Pinned    bool   `json:"pinned"`
+	CreatedAt string `json:"created_at"`
+	ID        string `json:"id"`
+}
+
+func encodeListCursor(cursor *store.ListCursor) string {
+	payload := listCursorPayload{
+		Pinned:    cursor.Pinned,
+		CreatedAt: cursor.CreatedAt.UTC().Format(time.RFC3339Nano),
+		ID:        cursor.ID,
+	}
+	b, _ := json.Marshal(payload)
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func decodeListCursor(raw string) (*store.ListCursor, error) {
+	b, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid cursor")
+	}
+	var payload listCursorPayload
+	if err := json.Unmarshal(b, &payload); err != nil {
+		return nil, fmt.Errorf("invalid cursor")
+	}
+	if strings.TrimSpace(payload.ID) == "" || strings.TrimSpace(payload.CreatedAt) == "" {
+		return nil, fmt.Errorf("invalid cursor")
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, payload.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("invalid cursor")
+	}
+	return &store.ListCursor{
+		Pinned:    payload.Pinned,
+		CreatedAt: createdAt.UTC(),
+		ID:        payload.ID,
+	}, nil
 }
 
 func (s *Server) handleCreateItem(w http.ResponseWriter, r *http.Request) {
