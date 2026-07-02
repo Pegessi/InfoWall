@@ -226,7 +226,7 @@ precedence over env vars**:
 | `INFOWALL_URL` | `http://localhost:8899` | CLI | Server base URL for `push`/`list` |
 | `INFOWALL_API_KEY` | *(unset)* | CLI & server | Shared secret for API auth |
 | `INFOWALL_ADDR` | `:8899` | `serve` | Listen address (overridden by `--addr`) |
-| `INFOWALL_DB` | `infowall.db` | `serve` | SQLite path (overridden by `--db`) |
+| `INFOWALL_DB` | `infowall.db` (in repo root) | `serve` / `db info` / `db backup` | SQLite path (overridden by `--db`). The production server always uses the canonical `<repo>/infowall.db`; do not override to a `/tmp/...` path for persistent use. |
 
 When `INFOWALL_API_KEY` / `--api-key` is set, **all writes and the SSE stream**
 require either `Authorization: Bearer <key>` or `?key=<key>` (the query form is
@@ -234,11 +234,59 @@ for `EventSource`, which cannot set headers). The SQLite DB file and the
 `bin/`, `web/dist`, and `cmd/infowall/dist` build artifacts are generated and
 git-ignored — do not commit them.
 
+## Canonical DB & Running the Production Server
+
+The production server for daily use runs on port **`:8899`** against the
+canonical SQLite database at **`<repo>/infowall.db`** (i.e. `infowall.db` in
+the project root; the built-in default when `--db` / `INFOWALL_DB` is not
+set). This is the single persistent wall of cards — do not casually replace
+it.
+
+- **Starting the production server.** From the project root, run
+  `./bin/infowall serve --addr 0.0.0.0:8899` (no `--db` flag). Logs go to
+  `/tmp/infowall.log`.
+- **Before starting, check nothing is already on :8899.** Run
+  `lsof -iTCP:8899 -sTCP:LISTEN`. If a server is already running, do not
+  start a second one — either reuse it or stop it explicitly (`kill <pid>`)
+  before starting a fresh binary. Two servers on the same port will race;
+  whichever bound first keeps the port and the second fails (or silently
+  binds a different address).
+- **Never use `/tmp/infowall-*.db` for the persistent wall.** `/tmp/` paths
+  are for throwaway smoke tests and scratch servers (use ports like
+  `:18899` / `:19999` and a random `/tmp/infowall-test-*.db` for those, and
+  kill them when done). Anything under `/tmp/` can be deleted by the OS or
+  by other agents.
+- **Do not overwrite `infowall.db`.** When rebuilding the binary after a
+  code change, kill the running server, run `make build`, then restart —
+  the existing `infowall.db` is preserved across restarts (it is not
+  recreated). The only ways to wipe the wall are: (a) user explicitly asks
+  for it, (b) running `rm infowall.db` yourself (do not), or (c) running a
+  smoke-test server pointed at a throwaway `/tmp/...db` (fine).
+- **Do not point `serve --db` at some random path** (e.g. a session-scoped
+  `/tmp/infowall-<sessionid>.db` left over from a previous agent) unless
+  the user asks for it or you are running an isolated test. Doing so
+  silently swaps out the wall and makes the user think their data is gone.
+- **CLI `db info` / `db backup` default to the canonical `infowall.db`**
+  from the current working directory (overridable with `--db`). Backups go
+  to a user-specified path via VACUUM INTO and never overwrite an existing
+  file.
+
+For a dev/frontend-only session (HMR, no embedded frontend), use two
+terminals as described under [Commands](#commands): `cd web && npm run dev`
+in one, `go run -tags dev ./cmd/infowall serve --dev` in the other. The dev
+server still writes to `infowall.db` by default; if you want an isolated
+dev DB pass `--db /tmp/infowall-dev.db`.
+
 ## Pitfalls
 
 - **No direct work on `main`**: always create a worktree + feature branch first.
   Even small fixes and doc changes go through a worktree. See
   [Mandatory Workflow](#mandatory-workflow). This is RULE #1.
+- **Don't clobber the persistent wall.** The production server on :8899 uses
+  `<repo>/infowall.db`; do not start a second server on that port, do not point
+  it at a throwaway `/tmp/...db`, and do not `rm infowall.db` unless the user
+  explicitly asks to wipe data. Read
+  [Canonical DB & Running the Production Server](#canonical-db--running-the-production-server).
 - **Dev vs. embedded frontend**: production builds embed `cmd/infowall/dist`
   through `dist_prod.go` (`//go:build !dev`). Building or running with
   `-tags dev` switches to `dist_dev.go`, which serves nothing — you **must**
