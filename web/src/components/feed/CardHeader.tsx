@@ -10,6 +10,8 @@ interface CardHeaderProps {
   onPin: (id: string, pinned: boolean) => void;
   onDelete: (id: string) => void;
   showTypeLabel?: boolean;
+  /** Compact mode for collapsed cards: tighter spacing, smaller text. */
+  compact?: boolean;
 }
 
 function hostOf(url?: string): string | null {
@@ -26,6 +28,7 @@ export function CardHeader({
   onPin,
   onDelete,
   showTypeLabel = true,
+  compact = false,
 }: CardHeaderProps) {
   const Icon = ICON_MAP[item.type] ?? ICON_MAP.note;
   const absTime = formatAbsolute(item.created_at);
@@ -73,11 +76,14 @@ export function CardHeader({
   useEffect(() => () => clearResetTimer(), []);
 
   return (
-    <div className="flex items-start gap-3">
+    <div className={cn("flex items-start gap-3", compact && "gap-2")}>
       {/* Left: type icon */}
-      <div className="flex flex-col items-center gap-1 pt-0.5">
+      <div className={cn("flex flex-col items-center gap-1", compact ? "pt-0" : "pt-0.5")}>
         <Icon
-          className="h-3.5 w-3.5 text-[hsl(var(--muted-foreground))]"
+          className={cn(
+            "text-[hsl(var(--muted-foreground))]",
+            compact ? "h-3.5 w-3.5" : "h-3.5 w-3.5"
+          )}
           strokeWidth={2}
         />
         {item.pinned && (
@@ -87,7 +93,7 @@ export function CardHeader({
 
       {/* Middle: title + meta */}
       <div className="flex-1 min-w-0">
-        {showTypeLabel && (
+        {showTypeLabel && !compact && (
           <div className="flex items-center gap-2">
             <span className="text-sm text-[hsl(var(--muted-foreground))] capitalize">
               {item.type === "stock-chart" ? "chart" : item.type}
@@ -99,47 +105,71 @@ export function CardHeader({
             href={item.meta.url}
             target="_blank"
             rel="noreferrer noopener"
-            className="block truncate font-semibold text-base text-[hsl(var(--accent))] hover:underline"
+            className={cn(
+              "block truncate font-semibold text-[hsl(var(--accent))] hover:underline",
+              compact ? "text-sm leading-tight" : "text-base"
+            )}
             title={item.title}
+            onClick={(e) => e.stopPropagation()}
           >
             {item.title}
           </a>
         ) : (
-          <h2 className="font-semibold text-base leading-snug" title={item.title}>
+          <h2
+            className={cn(
+              "font-semibold leading-snug",
+              compact ? "text-sm" : "text-base"
+            )}
+            title={item.title}
+          >
             {item.title}
           </h2>
         )}
-        <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-[hsl(var(--muted-foreground))]">
-          <time dateTime={item.created_at} title={absTime} className="whitespace-nowrap">
-            {relTime}
-          </time>
-          {hostname && (
-            <>
-              <span className="opacity-50">·</span>
-              <span className="whitespace-nowrap">{hostname}</span>
-            </>
-          )}
-          {item.tags?.map((tag) => (
-            <span
-              key={tag}
-              className="ml-0.5 whitespace-nowrap rounded-md bg-[hsl(var(--muted))] px-2 py-0.5 text-[11px]"
-            >
-              #{tag}
-            </span>
-          ))}
-        </div>
+        {!compact && (
+          <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-[hsl(var(--muted-foreground))]">
+            <time dateTime={item.created_at} title={absTime} className="whitespace-nowrap">
+              {relTime}
+            </time>
+            {hostname && (
+              <>
+                <span className="opacity-50">·</span>
+                <span className="whitespace-nowrap">{hostname}</span>
+              </>
+            )}
+            {item.tags?.map((tag) => (
+              <span
+                key={tag}
+                className="ml-0.5 whitespace-nowrap rounded-md bg-[hsl(var(--muted))] px-2 py-0.5 text-[11px]"
+              >
+                #{tag}
+              </span>
+            ))}
+          </div>
+        )}
+        {compact && (
+          <div className="mt-0.5 flex items-center gap-1 text-[11px] text-[hsl(var(--muted-foreground))]">
+            <time dateTime={item.created_at} title={absTime} className="whitespace-nowrap">
+              {relTime}
+            </time>
+          </div>
+        )}
       </div>
 
       {/* Right: actions */}
       <div
         className={cn(
-          "gap-1 pt-0.5",
+          "gap-1",
+          compact ? "pt-0" : "pt-0.5",
           confirmingDelete ? "flex" : "hidden group-hover:flex"
         )}
+        onClick={(e) => e.stopPropagation()}
       >
         <button
           type="button"
-          onClick={() => onPin(item.id, !item.pinned)}
+          onClick={(e) => {
+            e.stopPropagation();
+            onPin(item.id, !item.pinned);
+          }}
           title={item.pinned ? "Unpin" : "Pin"}
           aria-label={item.pinned ? "Unpin item" : "Pin item"}
           className="rounded p-1.5 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground"
@@ -164,7 +194,10 @@ export function CardHeader({
             <button
               type="button"
               ref={confirmButtonRef}
-              onClick={confirmDelete}
+              onClick={(e) => {
+                e.stopPropagation();
+                confirmDelete();
+              }}
               title="Confirm delete"
               aria-label={`Confirm delete: ${item.title || "item"}`}
               className="inline-flex items-center gap-1 rounded bg-[hsl(var(--negative))] px-2 py-1 text-xs font-medium text-white transition-colors hover:opacity-90"
@@ -174,7 +207,10 @@ export function CardHeader({
             </button>
             <button
               type="button"
-              onClick={cancelDelete}
+              onClick={(e) => {
+                e.stopPropagation();
+                cancelDelete();
+              }}
               title="Cancel"
               aria-label="Cancel delete"
               className="rounded p-1.5 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground"
@@ -185,7 +221,10 @@ export function CardHeader({
         ) : (
           <button
             type="button"
-            onClick={armDelete}
+            onClick={(e) => {
+              e.stopPropagation();
+              armDelete();
+            }}
             title="Delete"
             aria-label="Delete item"
             className="rounded p-1.5 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-[hsl(var(--negative))]"

@@ -44,6 +44,7 @@ import {
 } from "@/lib/feedFilter";
 import type { Item } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { isToday } from "@/lib/time";
 import { ICON_MAP } from "./iconMap";
 import { ItemCard } from "./ItemCard";
 import { EmptyState } from "./EmptyState";
@@ -209,6 +210,7 @@ export function FeedList() {
                     onDelete={deleteItem}
                     onColumnHeightChange={setColumnHeight}
                     onOpenTopic={setFocusedTopicId}
+                    collapseOlder={!filterActive}
                   />
                   <TopicBoard
                     columns={columns}
@@ -220,6 +222,7 @@ export function FeedList() {
                     onColumnWidthChange={setColumnWidth}
                     onColumnHeightChange={setColumnHeight}
                     onOpenTopic={setFocusedTopicId}
+                    collapseOlder={!filterActive}
                   />
                 </>
               ) : (
@@ -230,6 +233,7 @@ export function FeedList() {
                   onDelete={deleteItem}
                   onColumnHeightChange={setColumnHeight}
                   onOpenTopic={setFocusedTopicId}
+                  collapseOlder={!filterActive}
                 />
               )}
             </>
@@ -383,6 +387,8 @@ interface TopicStackProps {
   onDelete: (id: string) => void;
   onColumnHeightChange: (columnId: string, height: number) => void;
   onOpenTopic: (topicId: string) => void;
+  /** When true, older non-pinned, non-today items default to collapsed. */
+  collapseOlder?: boolean;
 }
 
 function TopicStack({
@@ -393,6 +399,7 @@ function TopicStack({
   onDelete,
   onColumnHeightChange,
   onOpenTopic,
+  collapseOlder = false,
 }: TopicStackProps) {
   const visibleColumns = columns.filter(
     (column) => (groupedItems.get(column.id)?.length ?? 0) > 0
@@ -479,6 +486,9 @@ function TopicStack({
                     onPin={onPin}
                     onDelete={onDelete}
                     showTypeLabel={false}
+                    defaultCollapsed={
+                      collapseOlder && !item.pinned && !isToday(item.created_at)
+                    }
                   />
                 ))}
               </div>
@@ -659,6 +669,8 @@ interface TopicBoardProps {
   onColumnWidthChange: (columnId: string, width: number) => void;
   onColumnHeightChange: (columnId: string, height: number) => void;
   onOpenTopic: (topicId: string) => void;
+  /** When true, older non-pinned, non-today items default to collapsed. */
+  collapseOlder?: boolean;
 }
 
 interface WidthResizeState {
@@ -683,6 +695,7 @@ function TopicBoard({
   onColumnWidthChange,
   onColumnHeightChange,
   onOpenTopic,
+  collapseOlder = false,
 }: TopicBoardProps) {
   const visibleColumns = columns.filter(
     (column) => (groupedItems.get(column.id)?.length ?? 0) > 0
@@ -992,6 +1005,9 @@ function TopicBoard({
                       onPin={onPin}
                       onDelete={onDelete}
                       showTypeLabel={false}
+                      defaultCollapsed={
+                        collapseOlder && !item.pinned && !isToday(item.created_at)
+                      }
                     />
                   ))}
                 </div>
