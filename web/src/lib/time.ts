@@ -1,4 +1,4 @@
-import { formatDistanceToNow, format, isSameDay, startOfDay } from "date-fns";
+import { formatDistanceToNow, format, isSameDay } from "date-fns";
 
 export function formatRelative(date: string | Date): string {
   const d = typeof date === "string" ? new Date(date) : date;
@@ -14,9 +14,4 @@ export function formatAbsolute(date: string | Date, fmt = "PPpp"): string {
 export function isToday(date: string | Date): boolean {
   const d = typeof date === "string" ? new Date(date) : date;
   return isSameDay(d, new Date());
-}
-
-/** Returns the start of today in local time — useful for date comparisons. */
-export function startOfToday(): Date {
-  return startOfDay(new Date());
 }
