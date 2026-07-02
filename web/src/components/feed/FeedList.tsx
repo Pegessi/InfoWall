@@ -21,6 +21,7 @@ import {
   useState,
   type CSSProperties,
   type DragEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
@@ -435,10 +436,19 @@ function TopicStack({
     (column: TopicColumnPreference, event: ReactPointerEvent<HTMLButtonElement>) => {
       event.preventDefault();
       event.stopPropagation();
+      // In fill mode panels are stretched to calc(100vh - chrome), so the rendered
+      // height differs from column.height. Seed the drag from the actual rendered
+      // height for a continuous first move; fall back to column.height otherwise.
+      const panel = event.currentTarget.closest<HTMLElement>(
+        "[data-topic-panel]"
+      );
+      const startHeight = panel
+        ? Math.round(panel.getBoundingClientRect().height)
+        : column.height;
       heightResizeStateRef.current = {
         id: column.id,
         startY: event.clientY,
-        startHeight: column.height,
+        startHeight,
       };
       setResizingHeightColumnId(column.id);
       document.body.style.cursor = "row-resize";
@@ -742,10 +752,20 @@ function TopicBoard({
     (column: TopicColumnPreference, event: ReactPointerEvent<HTMLButtonElement>) => {
       event.preventDefault();
       event.stopPropagation();
+      // In fill mode the panel is rendered stretched (minmax(width, 1fr)), so its
+      // on-screen width differs from column.width. Seed the drag from the actual
+      // rendered width so the first move is continuous instead of snapping to the
+      // preset pixel value. Fall back to column.width if the element is missing.
+      const panel = event.currentTarget.closest<HTMLElement>(
+        "[data-topic-panel]"
+      );
+      const startWidth = panel
+        ? Math.round(panel.getBoundingClientRect().width)
+        : column.width;
       widthResizeStateRef.current = {
         id: column.id,
         startX: event.clientX,
-        startWidth: column.width,
+        startWidth,
       };
       setResizingColumnId(column.id);
       document.body.style.cursor = "col-resize";
@@ -781,10 +801,19 @@ function TopicBoard({
     (column: TopicColumnPreference, event: ReactPointerEvent<HTMLButtonElement>) => {
       event.preventDefault();
       event.stopPropagation();
+      // In fill mode panels are stretched to calc(100vh - chrome), so the rendered
+      // height differs from column.height. Seed the drag from the actual rendered
+      // height for a continuous first move; fall back to column.height otherwise.
+      const panel = event.currentTarget.closest<HTMLElement>(
+        "[data-topic-panel]"
+      );
+      const startHeight = panel
+        ? Math.round(panel.getBoundingClientRect().height)
+        : column.height;
       heightResizeStateRef.current = {
         id: column.id,
         startY: event.clientY,
-        startHeight: column.height,
+        startHeight,
       };
       setResizingHeightColumnId(column.id);
       document.body.style.cursor = "row-resize";
@@ -812,6 +841,27 @@ function TopicBoard({
       document.addEventListener("pointermove", handlePointerMove);
       document.addEventListener("pointerup", stopResize);
       document.addEventListener("pointercancel", stopResize);
+    },
+    [onColumnHeightChange]
+  );
+
+  // Step buttons must also step from the *rendered* height in fill mode, or the
+  // first click would snap the stretched panel down to column.height ± step.
+  // Resolve the panel element from the clicked button and use its actual height.
+  const stepPanelHeight = useCallback(
+    (
+      column: TopicColumnPreference,
+      event: ReactMouseEvent<HTMLButtonElement>,
+      direction: -1 | 1
+    ) => {
+      event.stopPropagation();
+      const panel = event.currentTarget.closest<HTMLElement>(
+        "[data-topic-panel]"
+      );
+      const current = panel
+        ? Math.round(panel.getBoundingClientRect().height)
+        : column.height;
+      onColumnHeightChange(column.id, current + direction * PANEL_HEIGHT_STEP);
     },
     [onColumnHeightChange]
   );
@@ -969,13 +1019,7 @@ function TopicBoard({
                       column.height - PANEL_HEIGHT_STEP
                     )}px`}
                     disabled={column.height <= PANEL_MIN_HEIGHT}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onColumnHeightChange(
-                        column.id,
-                        column.height - PANEL_HEIGHT_STEP
-                      );
-                    }}
+                    onClick={(event) => stepPanelHeight(column, event, -1)}
                     className="rounded p-1 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
                   >
                     <ChevronUp className="h-4 w-4" strokeWidth={1.75} />
@@ -1002,13 +1046,7 @@ function TopicBoard({
                       column.height + PANEL_HEIGHT_STEP
                     )}px`}
                     disabled={column.height >= PANEL_MAX_HEIGHT}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onColumnHeightChange(
-                        column.id,
-                        column.height + PANEL_HEIGHT_STEP
-                      );
-                    }}
+                    onClick={(event) => stepPanelHeight(column, event, 1)}
                     className="rounded p-1 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
                   >
                     <ChevronDown className="h-4 w-4" strokeWidth={1.75} />

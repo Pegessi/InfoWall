@@ -58,3 +58,29 @@ inspection + logic assertions instead.
 
 ## Files
 - `web/src/components/feed/FeedList.tsx`
+
+## Review round 2 — drag/step jump-on-first-interaction fix
+
+Reviewer (iw-reviewer-1, attempt 2) approved the fill logic but flagged a real
+UX defect: in fill mode the panel is rendered stretched (full-width column,
+`calc(100vh - 9rem)` tall), but `column.width`/`column.height` still hold the
+preset pixel values. The drag/step handlers seeded their start value from those
+stored values, so the *first* drag/click snapped the panel from its stretched
+size to `preset ± delta` — a large visual jump.
+
+Fix: seed the interaction from the **actual rendered dimension**, read from the
+panel element via `event.currentTarget.closest('[data-topic-panel]')` +
+`getBoundingClientRect()`, falling back to the stored value if the element is
+absent. Applied to:
+- `beginWidthResize` (board) — start from rendered width.
+- `beginHeightResize` (board and stack) — start from rendered height.
+- New `stepPanelHeight` helper wired to the board's height +/- step buttons —
+  steps from the rendered height. (Width has no step button; the stack is never
+  in fill mode so its numbers already matched, but the same robust code path is
+  used there for the height drag.)
+
+Verified with logic assertions (mirroring the seed computation): fill-mode drag
+of −40px from a rendered 940px yields 900px (continuous), whereas the old
+stored-value path would have produced 560px (the jump). Custom mode is
+unchanged (rendered == stored). `npm run lint`, `npm run build`, `make build`,
+`go vet`, and `go test ./...` all pass again.
