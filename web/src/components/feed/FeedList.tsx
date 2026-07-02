@@ -51,11 +51,15 @@ import { FeedFilterBar } from "./FeedFilterBar";
 import { ConnectionStatus } from "./ConnectionStatus";
 
 const PANEL_HEIGHT_STEP = 80;
-const PANEL_VIEWPORT_FILL_HEIGHT = "calc(100vh - 8.5rem)";
 
+// The user-configured column.height is authoritative on every viewport. It is
+// already clamped to [PANEL_MIN_HEIGHT, PANEL_MAX_HEIGHT] via clampPanelHeight,
+// so we render it directly. A previous CSS `max(height, calc(100vh - 8.5rem))`
+// floor forced panels to viewport-fill height on tall/narrow (portrait)
+// viewports, silently overriding the height drag and step buttons.
 function topicPanelStyle(column: TopicColumnPreference): CSSProperties {
   return {
-    height: `min(${PANEL_MAX_HEIGHT}px, max(${column.height}px, ${PANEL_VIEWPORT_FILL_HEIGHT}))`,
+    height: `${column.height}px`,
   };
 }
 
