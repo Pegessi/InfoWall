@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Item } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { CardHeader } from "./CardHeader";
@@ -24,9 +24,17 @@ export function ItemCard({
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
   const Renderer = getRenderer(item.type);
 
-  // Only items that start collapsed are collapsible (pinned/today items always expanded).
-  const isCollapsible = defaultCollapsed;
+  // An item is collapsible only if it started collapsed AND is not currently pinned.
+  // Pinning always forces expanded (pin is an explicit "keep visible" signal).
+  const isCollapsible = defaultCollapsed && !item.pinned;
   const isCollapsed = isCollapsible && collapsed;
+
+  // Auto-expand when the item becomes pinned (in-session pin).
+  useEffect(() => {
+    if (item.pinned && collapsed) {
+      setCollapsed(false);
+    }
+  }, [item.pinned, collapsed]);
 
   const toggleCollapse = () => {
     if (!isCollapsible) return;
