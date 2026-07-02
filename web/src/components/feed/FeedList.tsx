@@ -21,6 +21,7 @@ import {
   useState,
   type CSSProperties,
   type DragEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
@@ -53,12 +54,29 @@ import { ConnectionStatus } from "./ConnectionStatus";
 
 const PANEL_HEIGHT_STEP = 80;
 
-// The user-configured column.height is authoritative on every viewport. It is
-// already clamped to [PANEL_MIN_HEIGHT, PANEL_MAX_HEIGHT] via clampPanelHeight,
-// so we render it directly. A previous CSS `max(height, calc(100vh - 8.5rem))`
-// floor forced panels to viewport-fill height on tall/narrow (portrait)
-// viewports, silently overriding the height drag and step buttons.
-function topicPanelStyle(column: TopicColumnPreference): CSSProperties {
+// Vertical chrome above the topic board (header + filter bar + layout controls
+// + gaps). Used only to size the default fill-to-screen height; the exact value
+// need not be pixel-perfect because the min-height clamp keeps panels usable.
+const BOARD_VERTICAL_CHROME = "9rem";
+
+// The user-configured column.height is authoritative once the user drags or
+// steps it: doing so flips presetId to "custom", which turns off fillToScreen
+// so we render the clamped pixel height directly. Only while the layout is an
+// untouched preset (fillToScreen) do we expand panels to fill the viewport, so
+// the default wall looks full without overriding manual height edits. A prior
+// task removed a blanket `max(height, calc(100vh - 8.5rem))` floor because it
+// applied even after manual edits and on portrait viewports; gating on
+// fillToScreen keeps the fill default while preserving that fix.
+function topicPanelStyle(
+  column: TopicColumnPreference,
+  fillToScreen: boolean
+): CSSProperties {
+  if (fillToScreen) {
+    return {
+      height: `calc(100vh - ${BOARD_VERTICAL_CHROME})`,
+      minHeight: `${PANEL_MIN_HEIGHT}px`,
+    };
+  }
   return {
     height: `${column.height}px`,
   };
@@ -226,6 +244,7 @@ export function FeedList() {
                     onColumnWidthChange={setColumnWidth}
                     onColumnHeightChange={setColumnHeight}
                     onOpenTopic={setFocusedTopicId}
+                    fillToScreen={layout.presetId !== CUSTOM_PRESET_ID}
                     collapseOlder={!filterActive}
                   />
                 </>
@@ -417,10 +436,19 @@ function TopicStack({
     (column: TopicColumnPreference, event: ReactPointerEvent<HTMLButtonElement>) => {
       event.preventDefault();
       event.stopPropagation();
+      // In fill mode panels are stretched to calc(100vh - chrome), so the rendered
+      // height differs from column.height. Seed the drag from the actual rendered
+      // height for a continuous first move; fall back to column.height otherwise.
+      const panel = event.currentTarget.closest<HTMLElement>(
+        "[data-topic-panel]"
+      );
+      const startHeight = panel
+        ? Math.round(panel.getBoundingClientRect().height)
+        : column.height;
       heightResizeStateRef.current = {
         id: column.id,
         startY: event.clientY,
-        startHeight: column.height,
+        startHeight,
       };
       setResizingHeightColumnId(column.id);
       document.body.style.cursor = "row-resize";
@@ -465,7 +493,7 @@ function TopicStack({
           <section
             key={column.id}
             data-topic-panel={column.id}
-            style={topicPanelStyle(column)}
+            style={topicPanelStyle(column, false)}
             className="group/topic-panel relative flex min-w-0 flex-col rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] shadow-sm"
           >
             <TopicPanelHeader
@@ -673,6 +701,12 @@ interface TopicBoardProps {
   onColumnWidthChange: (columnId: string, width: number) => void;
   onColumnHeightChange: (columnId: string, height: number) => void;
   onOpenTopic: (topicId: string) => void;
+  /**
+   * When true, the layout is an untouched preset: columns stretch to fill the
+   * container width and panels fill the viewport height. Any manual width/height
+   * edit flips presetId to "custom", turning this off so pixel values win.
+   */
+  fillToScreen: boolean;
   /** When true, older non-pinned, non-today items default to collapsed. */
   collapseOlder?: boolean;
 }
@@ -699,6 +733,7 @@ function TopicBoard({
   onColumnWidthChange,
   onColumnHeightChange,
   onOpenTopic,
+  fillToScreen,
   collapseOlder = false,
 }: TopicBoardProps) {
   const visibleColumns = columns.filter(
@@ -717,10 +752,20 @@ function TopicBoard({
     (column: TopicColumnPreference, event: ReactPointerEvent<HTMLButtonElement>) => {
       event.preventDefault();
       event.stopPropagation();
+      // In fill mode the panel is rendered stretched (minmax(width, 1fr)), so its
+      // on-screen width differs from column.width. Seed the drag from the actual
+      // rendered width so the first move is continuous instead of snapping to the
+      // preset pixel value. Fall back to column.width if the element is missing.
+      const panel = event.currentTarget.closest<HTMLElement>(
+        "[data-topic-panel]"
+      );
+      const startWidth = panel
+        ? Math.round(panel.getBoundingClientRect().width)
+        : column.width;
       widthResizeStateRef.current = {
         id: column.id,
         startX: event.clientX,
-        startWidth: column.width,
+        startWidth,
       };
       setResizingColumnId(column.id);
       document.body.style.cursor = "col-resize";
@@ -756,10 +801,19 @@ function TopicBoard({
     (column: TopicColumnPreference, event: ReactPointerEvent<HTMLButtonElement>) => {
       event.preventDefault();
       event.stopPropagation();
+      // In fill mode panels are stretched to calc(100vh - chrome), so the rendered
+      // height differs from column.height. Seed the drag from the actual rendered
+      // height for a continuous first move; fall back to column.height otherwise.
+      const panel = event.currentTarget.closest<HTMLElement>(
+        "[data-topic-panel]"
+      );
+      const startHeight = panel
+        ? Math.round(panel.getBoundingClientRect().height)
+        : column.height;
       heightResizeStateRef.current = {
         id: column.id,
         startY: event.clientY,
-        startHeight: column.height,
+        startHeight,
       };
       setResizingHeightColumnId(column.id);
       document.body.style.cursor = "row-resize";
@@ -791,9 +845,36 @@ function TopicBoard({
     [onColumnHeightChange]
   );
 
+  // Step buttons must also step from the *rendered* height in fill mode, or the
+  // first click would snap the stretched panel down to column.height ± step.
+  // Resolve the panel element from the clicked button and use its actual height.
+  const stepPanelHeight = useCallback(
+    (
+      column: TopicColumnPreference,
+      event: ReactMouseEvent<HTMLButtonElement>,
+      direction: -1 | 1
+    ) => {
+      event.stopPropagation();
+      const panel = event.currentTarget.closest<HTMLElement>(
+        "[data-topic-panel]"
+      );
+      const current = panel
+        ? Math.round(panel.getBoundingClientRect().height)
+        : column.height;
+      onColumnHeightChange(column.id, current + direction * PANEL_HEIGHT_STEP);
+    },
+    [onColumnHeightChange]
+  );
+
   const gridStyle: CSSProperties = {
+    // Untouched preset: each column keeps its width as a lower bound but shares
+    // leftover width (minmax(width, 1fr)) so the board fills the container. Once
+    // the user resizes a column (presetId -> "custom"), fall back to fixed pixel
+    // tracks so their exact widths are honored.
     gridTemplateColumns: visibleColumns
-      .map((column) => `${column.width}px`)
+      .map((column) =>
+        fillToScreen ? `minmax(${column.width}px, 1fr)` : `${column.width}px`
+      )
       .join(" "),
   };
 
@@ -801,7 +882,10 @@ function TopicBoard({
 
   return (
     <div className="hidden overflow-x-auto pb-2 lg:block" data-feed-layout="topics">
-      <div className="grid items-start gap-3" style={gridStyle}>
+      <div
+        className={cn("grid items-start gap-3", fillToScreen && "w-full")}
+        style={gridStyle}
+      >
         {visibleColumns.map((column, index) => {
           const items = groupedItems.get(column.id) ?? [];
           const label = formatTopicLabel(column.id);
@@ -814,7 +898,7 @@ function TopicBoard({
             <section
               key={column.id}
               data-topic-panel={column.id}
-              style={topicPanelStyle(column)}
+              style={topicPanelStyle(column, fillToScreen)}
               className={cn(
                 "group/topic-panel relative flex min-w-0 flex-col rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] shadow-sm transition-opacity",
                 isDragging && "opacity-50",
@@ -935,13 +1019,7 @@ function TopicBoard({
                       column.height - PANEL_HEIGHT_STEP
                     )}px`}
                     disabled={column.height <= PANEL_MIN_HEIGHT}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onColumnHeightChange(
-                        column.id,
-                        column.height - PANEL_HEIGHT_STEP
-                      );
-                    }}
+                    onClick={(event) => stepPanelHeight(column, event, -1)}
                     className="rounded p-1 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
                   >
                     <ChevronUp className="h-4 w-4" strokeWidth={1.75} />
@@ -968,13 +1046,7 @@ function TopicBoard({
                       column.height + PANEL_HEIGHT_STEP
                     )}px`}
                     disabled={column.height >= PANEL_MAX_HEIGHT}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      onColumnHeightChange(
-                        column.id,
-                        column.height + PANEL_HEIGHT_STEP
-                      );
-                    }}
+                    onClick={(event) => stepPanelHeight(column, event, 1)}
                     className="rounded p-1 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
                   >
                     <ChevronDown className="h-4 w-4" strokeWidth={1.75} />
