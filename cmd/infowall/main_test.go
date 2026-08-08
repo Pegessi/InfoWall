@@ -429,12 +429,12 @@ func TestExportCommandJSONFailure(t *testing.T) {
 	if stdout != "" {
 		t.Fatalf("stdout should be empty on JSON failure, got %q", stdout)
 	}
-	var got map[string]string
+	var got cliErrorEnvelope
 	if err := json.Unmarshal([]byte(stderr), &got); err != nil {
 		t.Fatalf("stderr should be JSON error, got %q: %v", stderr, err)
 	}
-	if !strings.Contains(got["error"], "server 401") {
-		t.Fatalf("error should mention status, got %q", got["error"])
+	if !strings.Contains(got.Error, "server 401") {
+		t.Fatalf("error should mention status, got %q", got.Error)
 	}
 }
 
@@ -501,12 +501,12 @@ func TestHealthCommandJSONFailure(t *testing.T) {
 		t.Fatalf("stdout should be empty on JSON failure, got %q", stdout)
 	}
 
-	var got map[string]string
+	var got cliErrorEnvelope
 	if err := json.Unmarshal([]byte(stderr), &got); err != nil {
 		t.Fatalf("stderr should be JSON error, got %q: %v", stderr, err)
 	}
-	if !strings.Contains(got["error"], "server 503") {
-		t.Fatalf("error should mention server status, got %q", got["error"])
+	if !strings.Contains(got.Error, "server 503") {
+		t.Fatalf("error should mention server status, got %q", got.Error)
 	}
 }
 
@@ -608,12 +608,12 @@ func TestDoctorCommandAuthFailure(t *testing.T) {
 		t.Fatalf("stdout should be empty on JSON failure, got %q", stdout)
 	}
 
-	var got map[string]string
+	var got cliErrorEnvelope
 	if err := json.Unmarshal([]byte(stderr), &got); err != nil {
 		t.Fatalf("stderr should be JSON error, got %q: %v", stderr, err)
 	}
-	if !strings.Contains(got["error"], "auth check") || !strings.Contains(got["error"], "server 401") {
-		t.Fatalf("error should distinguish auth failure, got %q", got["error"])
+	if !strings.Contains(got.Error, "auth check") || !strings.Contains(got.Error, "server 401") {
+		t.Fatalf("error should distinguish auth failure, got %q", got.Error)
 	}
 }
 
@@ -646,12 +646,12 @@ func TestDoctorCommandHealthFailureSkipsAuthProbe(t *testing.T) {
 		t.Fatalf("stdout should be empty on JSON failure, got %q", stdout)
 	}
 
-	var got map[string]string
+	var got cliErrorEnvelope
 	if err := json.Unmarshal([]byte(stderr), &got); err != nil {
 		t.Fatalf("stderr should be JSON error, got %q: %v", stderr, err)
 	}
-	if !strings.Contains(got["error"], "server health") || !strings.Contains(got["error"], "server 503") {
-		t.Fatalf("error should distinguish health failure, got %q", got["error"])
+	if !strings.Contains(got.Error, "server health") || !strings.Contains(got.Error, "server 503") {
+		t.Fatalf("error should distinguish health failure, got %q", got.Error)
 	}
 }
 

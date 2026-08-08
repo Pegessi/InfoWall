@@ -160,7 +160,7 @@ export function CardHeader({
         className={cn(
           "gap-1",
           compact ? "pt-0" : "pt-0.5",
-          confirmingDelete ? "flex" : "hidden group-hover:flex"
+          confirmingDelete ? "flex" : "flex sm:hidden sm:group-hover:flex"
         )}
         onClick={(e) => e.stopPropagation()}
       >
@@ -172,7 +172,7 @@ export function CardHeader({
           }}
           title={item.pinned ? "Unpin" : "Pin"}
           aria-label={item.pinned ? "Unpin item" : "Pin item"}
-          className="rounded p-1.5 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground"
+          className="inline-flex h-9 w-9 items-center justify-center rounded text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground sm:h-auto sm:w-auto sm:p-1.5"
         >
           {item.pinned ? (
             <PinOff className="h-4 w-4" strokeWidth={1.75} />
@@ -213,7 +213,7 @@ export function CardHeader({
               }}
               title="Cancel"
               aria-label="Cancel delete"
-              className="rounded p-1.5 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground"
+              className="inline-flex h-9 w-9 items-center justify-center rounded text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground sm:h-auto sm:w-auto sm:p-1.5"
             >
               <X className="h-4 w-4" strokeWidth={1.75} />
             </button>
@@ -227,7 +227,7 @@ export function CardHeader({
             }}
             title="Delete"
             aria-label="Delete item"
-            className="rounded p-1.5 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-[hsl(var(--negative))]"
+            className="inline-flex h-9 w-9 items-center justify-center rounded text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-[hsl(var(--negative))] sm:h-auto sm:w-auto sm:p-1.5"
           >
             <Trash2 className="h-4 w-4" strokeWidth={1.75} />
           </button>

@@ -10,6 +10,10 @@
 //	delete    delete an item
 //	health    check that a running server is reachable
 //	doctor    run read-only local operation diagnostics
+//	demand    create, import, inspect, and update tracked demands
+//	project   create and manage demand projects
+//	sync      configure and run external integrations
+//	agent     print the machine-readable CLI contract
 //	version   print version info
 //
 // The push, list, get, export, pin, unpin, delete, health, and doctor commands
@@ -84,6 +88,14 @@ func run(args []string) error {
 		return cmdDoctor(rest)
 	case "db":
 		return cmdDB(rest)
+	case "demand":
+		return cmdDemand(rest)
+	case "project":
+		return cmdProject(rest)
+	case "sync":
+		return cmdSync(rest)
+	case "agent":
+		return cmdAgent(rest)
 	case "version", "--version", "-v":
 		fmt.Printf("infowall v%s (commit %s)\n", version, commit)
 		return nil
@@ -100,7 +112,7 @@ func printUsage() {
 	fmt.Println(`infowall — personal information wall
 
 Usage:
-  infowall serve   [--addr :8899] [--db infowall.db] [--dev] [--api-key KEY]
+  infowall serve   [--addr :8899] [--db infowall.db] [--default-view infowall|workbench] [--dev] [--api-key KEY]
   infowall push    [file|- ...] [-t/--topic TOPIC] [--type TYPE] [--pin] [--server URL] [--api-key KEY] [--json]
   infowall list    [--limit N] [--topic TOPIC] [--type TYPE] [--server URL] [--api-key KEY] [--json]
   infowall get     <id> [--raw] [--server URL] [--api-key KEY] [--json]
@@ -112,6 +124,10 @@ Usage:
   infowall doctor  [--server URL] [--api-key KEY] [--json]
   infowall db info   [--db infowall.db] [--json]
   infowall db backup --out PATH [--db infowall.db] [--json]
+  infowall demand <apply|create|import|list|get|update|progress|dismiss|restore> [flags]
+  infowall project <create|list|update|archive> [flags]
+  infowall sync feishu <setup|status|now|disable> [flags]
+  infowall agent spec [--json]
   infowall version
 
 Examples:
@@ -129,11 +145,18 @@ Examples:
   infowall doctor --json                      # health + auth diagnostic
   infowall db info --json                     # report local DB path/size/count
   infowall db backup --out backups/wall.db    # safe live backup (VACUUM INTO)
+  infowall demand create --title "排查吞吐下降" --status pending --json
+  infowall demand apply --input demands.json --json
+  infowall demand progress DEMAND_ID --text "已收集日志" --json
+  infowall project create --name "M15 性能" --json
+  infowall sync feishu setup --create --json
 
 Agent-friendly notes:
+  * Run infowall agent spec --json to discover commands, enums, input shapes,
+    idempotency guarantees, and stable error codes without parsing this text.
   * Every server-talking client command supports --json for structured stdout;
-    on failure a JSON object {"error": "..."} is written to stderr and the exit
-    code is non-zero.
+    on failure structured JSON is written to stderr, stdout stays empty, and
+    the exit code is non-zero.
   * push is fully non-interactive when given file arguments, so it never
     blocks waiting for input. Use it to upload complex markdown from files
     instead of squeezing content onto the command line. Push whole folders
@@ -148,15 +171,17 @@ func cmdServe(args []string) error {
 	db := fs.String("db", envOr("INFOWALL_DB", "infowall.db"), "SQLite database path")
 	dev := fs.Bool("dev", false, "dev mode: proxy frontend to Vite on :5173")
 	apiKey := fs.String("api-key", os.Getenv("INFOWALL_API_KEY"), "API key for write/auth")
+	defaultView := fs.String("default-view", envOr("INFOWALL_DEFAULT_VIEW", "workbench"), "default frontend: infowall or workbench")
 	fs.Parse(args)
 
 	ctx := context.Background()
 	s, err := server.New(ctx, server.Config{
-		Addr:   *addr,
-		DBPath: *db,
-		Dev:    *dev,
-		APIKey: *apiKey,
-		DistFS: distFS(),
+		Addr:        *addr,
+		DBPath:      *db,
+		Dev:         *dev,
+		APIKey:      *apiKey,
+		DistFS:      distFS(),
+		DefaultView: *defaultView,
 	})
 	if err != nil {
 		return err
@@ -1094,11 +1119,11 @@ func cmdDBBackup(args []string) error {
 }
 
 // failLocal emits an error for the local (non-HTTP) db commands using the same
-// contract as clientConfig.fail: JSON {"error":...} on stderr in --json mode,
+// contract as clientConfig.fail on stderr in --json mode,
 // otherwise a plain returned error. Either way the process exits non-zero.
 func failLocal(asJSON bool, err error) error {
 	if asJSON {
-		json.NewEncoder(os.Stderr).Encode(map[string]string{"error": err.Error()})
+		writeCLIErrorJSON(err)
 		return errEmitted{err}
 	}
 	return err
@@ -1191,12 +1216,11 @@ func (c *clientConfig) do(method, url, contentType string, body io.Reader) (*htt
 }
 
 // fail emits an error in the configured format. In JSON mode it writes
-// {"error": "..."} to stderr; otherwise it returns the error for main to print.
+// a structured envelope to stderr; otherwise it returns the error for main to print.
 // Either way the returned error triggers a non-zero exit.
 func (c *clientConfig) fail(err error) error {
 	if c.asJSON {
-		enc := json.NewEncoder(os.Stderr)
-		enc.Encode(map[string]string{"error": err.Error()})
+		writeCLIErrorJSON(err)
 		return errEmitted{err}
 	}
 	return err

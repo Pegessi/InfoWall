@@ -34,7 +34,7 @@ export function FeedFilterBar({
   return (
     <div className="flex flex-wrap items-center gap-2">
       {/* Search */}
-      <div className="relative min-w-0 flex-1 basis-48">
+      <div className="relative w-full min-w-0 flex-none sm:flex-1 sm:basis-48">
         <Search
           className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[hsl(var(--muted-foreground))]"
           strokeWidth={1.75}
@@ -46,7 +46,7 @@ export function FeedFilterBar({
           onChange={(event) => onQueryChange(event.target.value)}
           placeholder="Search feed…"
           aria-label="Search feed"
-          className="h-9 w-full rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--card))] pl-8 pr-8 text-sm text-[hsl(var(--foreground))] shadow-sm outline-none transition-colors placeholder:text-[hsl(var(--muted-foreground))] focus:ring-2 focus:ring-[hsl(var(--ring))]"
+          className="h-10 w-full rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--card))] pl-8 pr-8 text-sm text-[hsl(var(--foreground))] shadow-sm outline-none transition-colors placeholder:text-[hsl(var(--muted-foreground))] focus:ring-2 focus:ring-[hsl(var(--ring))] sm:h-9"
         />
         {filter.query !== "" && (
           <button
@@ -66,7 +66,7 @@ export function FeedFilterBar({
         aria-label="Filter by type"
         value={filter.type}
         onChange={(event) => onTypeChange(event.target.value)}
-        className="h-9 max-w-[40vw] rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-2.5 text-sm text-[hsl(var(--foreground))] shadow-sm outline-none transition-colors hover:bg-[hsl(var(--muted))] focus:ring-2 focus:ring-[hsl(var(--ring))]"
+        className="h-10 min-w-0 flex-1 rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-2.5 text-sm text-[hsl(var(--foreground))] shadow-sm outline-none transition-colors hover:bg-[hsl(var(--muted))] focus:ring-2 focus:ring-[hsl(var(--ring))] sm:h-9 sm:max-w-[40vw] sm:flex-none"
       >
         <option value="">All types</option>
         {availableTypes.map((type) => (
@@ -86,7 +86,7 @@ export function FeedFilterBar({
           onPinnedChange(filter.pinned === "pinned" ? "all" : "pinned")
         }
         className={cn(
-          "inline-flex h-9 shrink-0 items-center gap-1.5 rounded-md border border-[hsl(var(--border))] px-2.5 text-sm shadow-sm transition-colors",
+          "inline-flex h-10 shrink-0 items-center gap-1.5 rounded-md border border-[hsl(var(--border))] px-3 text-sm shadow-sm transition-colors sm:h-9 sm:px-2.5",
           filter.pinned === "pinned"
             ? "bg-[hsl(var(--accent))] text-[hsl(var(--accent-foreground))]"
             : "bg-[hsl(var(--card))] text-[hsl(var(--muted-foreground))] hover:bg-[hsl(var(--muted))] hover:text-foreground"
@@ -104,7 +104,7 @@ export function FeedFilterBar({
           this shows how many are loaded so far, with a + when more pages exist. */}
       <span
         aria-live="polite"
-        className="shrink-0 whitespace-nowrap text-xs tabular-nums text-[hsl(var(--muted-foreground))]"
+        className="ml-auto shrink-0 whitespace-nowrap text-xs tabular-nums text-[hsl(var(--muted-foreground))] sm:ml-0"
       >
         {active
           ? `${resultCount}${hasMore ? "+" : ""} ${resultCount === 1 ? "match" : "matches"}`
@@ -120,7 +120,7 @@ export function FeedFilterBar({
           onClick={onReset}
           aria-label="Clear all filters"
           title="Clear filters"
-          className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-2.5 text-sm text-[hsl(var(--muted-foreground))] shadow-sm transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground"
+          className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 text-sm text-[hsl(var(--muted-foreground))] shadow-sm transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground sm:h-9 sm:px-2.5"
         >
           <X className="h-3.5 w-3.5" strokeWidth={2} />
           <span className="hidden sm:inline">Clear</span>

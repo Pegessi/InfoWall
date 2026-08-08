@@ -1,0 +1,4 @@
+interface:
+  display_name: "InfoWall 需求整理"
+  short_description: "从飞书聊天提取需求证据并安全同步到 InfoWall"
+  default_prompt: "使用 $infowall-demand 整理本周飞书聊天中的需求候选并同步到 InfoWall。"

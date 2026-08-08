@@ -346,7 +346,7 @@ function LayoutControls({
   return (
     <div className="flex flex-wrap items-center justify-between gap-3">
       <div className="inline-flex items-center gap-3">
-        <div className="inline-flex rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-1">
+        <div className="hidden rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] p-1 lg:inline-flex">
         <button
           type="button"
           aria-pressed={mode === "single"}
@@ -389,7 +389,7 @@ function LayoutControls({
             onPresetChange(event.target.value);
           }
         }}
-        className="h-9 rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 text-sm text-[hsl(var(--foreground))] shadow-sm outline-none transition-colors hover:bg-[hsl(var(--muted))] focus:ring-2 focus:ring-[hsl(var(--ring))]"
+        className="hidden h-9 rounded-md border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 text-sm text-[hsl(var(--foreground))] shadow-sm outline-none transition-colors hover:bg-[hsl(var(--muted))] focus:ring-2 focus:ring-[hsl(var(--ring))] lg:block"
       >
         {showCustomPreset && <option value={CUSTOM_PRESET_ID}>Custom</option>}
         {presets.map((preset) => (
@@ -493,8 +493,8 @@ function TopicStack({
           <section
             key={column.id}
             data-topic-panel={column.id}
-            style={topicPanelStyle(column, false)}
-            className="group/topic-panel relative flex min-w-0 flex-col rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] shadow-sm"
+            style={{ "--topic-stack-height": `${column.height}px` } as CSSProperties}
+            className="group/topic-panel relative flex h-auto min-w-0 flex-col rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--card))] shadow-sm sm:h-[var(--topic-stack-height)]"
           >
             <TopicPanelHeader
               column={column}
@@ -508,7 +508,7 @@ function TopicStack({
             />
             <div
               data-topic-scroll={column.id}
-              className="min-h-0 flex-1 overflow-y-auto px-2 pb-4 pt-2.5 sm:px-3"
+              className="min-h-0 flex-1 overflow-visible px-2 pb-3 pt-2.5 sm:overflow-y-auto sm:px-3 sm:pb-4"
             >
               <div className="space-y-3">
                 {items.map((item) => (
@@ -575,7 +575,7 @@ function TopicPanelHeader({
         event.preventDefault();
         onOpenTopic(column.id);
       }}
-      className="group/topic-header relative flex min-h-14 shrink-0 cursor-pointer flex-wrap items-center gap-2 rounded-t-lg border-b border-[hsl(var(--border))] bg-[hsl(var(--background)/0.94)] px-3 py-2 backdrop-blur transition-colors hover:bg-[hsl(var(--muted)/0.75)]"
+      className="group/topic-header relative flex min-h-12 shrink-0 cursor-pointer flex-wrap items-center gap-2 rounded-t-lg border-b border-[hsl(var(--border))] bg-[hsl(var(--background)/0.94)] px-3 py-2 backdrop-blur transition-colors hover:bg-[hsl(var(--muted)/0.75)] sm:min-h-14"
     >
       <Icon
         className="h-4 w-4 text-[hsl(var(--muted-foreground))]"
@@ -615,7 +615,7 @@ function TopicPanelHeader({
             event.stopPropagation();
             onColumnHeightChange(column.id, column.height - PANEL_HEIGHT_STEP);
           }}
-          className="rounded p-1 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
+          className="hidden rounded p-1 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30 sm:block"
         >
           <ChevronUp className="h-4 w-4" strokeWidth={1.75} />
         </button>
@@ -625,7 +625,7 @@ function TopicPanelHeader({
           title={`${column.height}px`}
           onPointerDown={(event) => onBeginHeightResize(column, event)}
           className={cn(
-            "inline-flex h-7 min-w-12 cursor-row-resize touch-none items-center justify-center gap-1 rounded border border-[hsl(var(--border))] px-1.5 text-[11px] tabular-nums text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground",
+            "hidden h-7 min-w-12 cursor-row-resize touch-none items-center justify-center gap-1 rounded border border-[hsl(var(--border))] px-1.5 text-[11px] tabular-nums text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground sm:inline-flex",
             resizingHeightColumnId === column.id &&
               "bg-[hsl(var(--accent))] text-[hsl(var(--accent-foreground))]"
           )}
@@ -645,7 +645,7 @@ function TopicPanelHeader({
             event.stopPropagation();
             onColumnHeightChange(column.id, column.height + PANEL_HEIGHT_STEP);
           }}
-          className="rounded p-1 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30"
+          className="hidden rounded p-1 text-[hsl(var(--muted-foreground))] transition-colors hover:bg-[hsl(var(--muted))] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30 sm:block"
         >
           <ChevronDown className="h-4 w-4" strokeWidth={1.75} />
         </button>
@@ -677,7 +677,7 @@ function TopicHeightEdge({
       title={`Drag to resize height (${column.height}px)`}
       onPointerDown={(event) => onBeginHeightResize(column, event)}
       className={cn(
-        "absolute inset-x-0 -bottom-2 z-10 flex h-4 cursor-row-resize touch-none items-center justify-center rounded-b-lg",
+        "absolute inset-x-0 -bottom-2 z-10 hidden h-4 cursor-row-resize touch-none items-center justify-center rounded-b-lg sm:flex",
         isResizing && "bg-[hsl(var(--accent)/0.18)]"
       )}
     >

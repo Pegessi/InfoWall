@@ -22,7 +22,7 @@ push` items into it, and pin the tab.
 make build
 
 # Start the server:
-./bin/infowall serve --addr :8899 --db infowall.db
+./bin/infowall serve --addr :8899 --db infowall.db --default-view workbench
 
 # In another terminal, push a note:
 echo "# hello world" | ./bin/infowall push -
@@ -34,6 +34,49 @@ echo "# hello world" | ./bin/infowall push -
 Open <http://localhost:8899> in a browser. New items appear live without a
 page refresh. On a fresh empty wall, the app shows compact copyable commands
 for `infowall health --json` and the first markdown push.
+
+Choose which interface an unqualified browser URL opens with
+`--default-view infowall|workbench` (or `INFOWALL_DEFAULT_VIEW`). Explicit
+links such as `#wall` and `#workbench/projects` always keep their destination.
+The same choice is available from **Default home / 默认首页** in the shared
+page header. It is persisted in the server SQLite database and shared by all
+browsers; the startup value only initializes databases without the setting.
+
+The personal demand workbench is available at
+<http://localhost:8899/#workbench/demands>. SQLite remains the sole source of
+truth; the browser and CLI both update it through the local API:
+
+```bash
+# Create a project and a demand, then append progress.
+./bin/infowall project create --name "InfoWall" --json
+./bin/infowall demand create --title "完善个人需求工作台" \
+  --status pending --priority p1 --project-hint "InfoWall" --json
+./bin/infowall demand progress DEMAND_ID --text "已完成第一轮联调" --json
+
+# Create the one-way Feishu mirror, or bind an existing document URL.
+./bin/infowall sync feishu setup --create --json
+./bin/infowall sync feishu setup --doc "https://example.feishu.cn/docx/TOKEN" --json
+./bin/infowall sync feishu status --json
+```
+
+Agents should discover the installed contract instead of parsing help text:
+
+```bash
+./bin/infowall agent spec --json
+printf '%s\n' '{"title":"整理发布验收清单","status":"pending","sources":[{"kind":"agent","dedupe_key":"agent:release-checklist:v1"}]}' \
+  | ./bin/infowall demand apply --input - --json
+```
+
+`demand apply` accepts one demand, an array, or `{ "demands": [...] }` and is
+the preferred retry-safe write path. JSON failures keep stdout empty and add
+stable `error_code`, `retryable`, `http_status`, and recovery `hint` fields on
+stderr.
+
+The repository also contains the Codex skill at
+`skills/infowall-demand`. Install it by linking that directory into
+`${CODEX_HOME:-$HOME/.codex}/skills/infowall-demand`; it scans Feishu messages
+on demand, retains only demand evidence, and imports candidates through the
+running local service.
 
 The browser groups same-topic items into topic panels by default: links, notes,
 papers, images, and charts each get their own fixed-height panel with the
@@ -682,6 +725,7 @@ curl -sN http://localhost:8899/events
 | `INFOWALL_API_KEY` | *(unset)*                | CLI/server | Shared secret for API auth          |
 | `INFOWALL_ADDR`    | `:8899`                  | `serve`    | Listen address (overridden by --addr)|
 | `INFOWALL_DB`      | `infowall.db`            | `serve`, `db` | SQLite path (overridden by --db)   |
+| `INFOWALL_DEFAULT_VIEW` | `workbench`         | `serve`    | Default interface: `infowall` or `workbench` |
 
 CLI flags take precedence over environment variables.
 

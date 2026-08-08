@@ -26,7 +26,7 @@ type Store struct {
 // introduced report user_version = 0 and are structurally identical to v1, so
 // migrating 0 -> 1 only stamps the version (no data change). Bump this and add a
 // case in migrate() when the schema changes in a future release.
-const schemaVersion = 1
+const schemaVersion = 3
 
 const schema = `
 CREATE TABLE IF NOT EXISTS items (
@@ -42,6 +42,90 @@ CREATE TABLE IF NOT EXISTS items (
 );
 CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_items_pinned  ON items(pinned DESC, created_at DESC);
+`
+
+const workbenchSchema = `
+CREATE TABLE IF NOT EXISTS projects (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    color       TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
+    created_at  DATETIME NOT NULL,
+    updated_at  DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_projects_status_name ON projects(status, name COLLATE NOCASE);
+
+CREATE TABLE IF NOT EXISTS demands (
+    id             TEXT PRIMARY KEY,
+    title          TEXT NOT NULL,
+    description    TEXT NOT NULL DEFAULT '',
+    status         TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'planned', 'active', 'waiting', 'done', 'dismissed')),
+    priority       TEXT NOT NULL DEFAULT 'none' CHECK (priority IN ('p0', 'p1', 'p2', 'p3', 'none')),
+    project_id     TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    project_hint   TEXT NOT NULL DEFAULT '',
+    next_action    TEXT NOT NULL DEFAULT '',
+    blocked_reason TEXT NOT NULL DEFAULT '',
+    created_at     DATETIME NOT NULL,
+    updated_at     DATETIME NOT NULL,
+    completed_at   DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_demands_status_updated ON demands(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_demands_project_updated ON demands(project_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS demand_sources (
+    id           TEXT PRIMARY KEY,
+    demand_id    TEXT NOT NULL REFERENCES demands(id) ON DELETE CASCADE,
+    kind         TEXT NOT NULL,
+    external_id  TEXT NOT NULL DEFAULT '',
+    chat_id      TEXT NOT NULL DEFAULT '',
+    chat_name    TEXT NOT NULL DEFAULT '',
+    sender_id    TEXT NOT NULL DEFAULT '',
+    sender_name  TEXT NOT NULL DEFAULT '',
+    message_time DATETIME,
+    url          TEXT NOT NULL DEFAULT '',
+    excerpt      TEXT NOT NULL DEFAULT '',
+    dedupe_key   TEXT NOT NULL DEFAULT '',
+    created_at   DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_demand_sources_demand ON demand_sources(demand_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_demand_sources_dedupe
+    ON demand_sources(dedupe_key) WHERE dedupe_key <> '';
+
+CREATE TABLE IF NOT EXISTS demand_progress (
+    id         TEXT PRIMARY KEY,
+    demand_id  TEXT NOT NULL REFERENCES demands(id) ON DELETE CASCADE,
+    text       TEXT NOT NULL,
+    created_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_demand_progress_demand ON demand_progress(demand_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS feishu_sync_state (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled         INTEGER NOT NULL DEFAULT 0,
+    doc_token       TEXT NOT NULL DEFAULT '',
+    doc_url         TEXT NOT NULL DEFAULT '',
+    dirty           INTEGER NOT NULL DEFAULT 0,
+    desired_version INTEGER NOT NULL DEFAULT 0,
+    synced_version  INTEGER NOT NULL DEFAULT 0,
+    status          TEXT NOT NULL DEFAULT 'disabled',
+    last_revision   TEXT NOT NULL DEFAULT '',
+    last_hash       TEXT NOT NULL DEFAULT '',
+    last_success_at DATETIME,
+    last_error      TEXT NOT NULL DEFAULT '',
+    retry_count     INTEGER NOT NULL DEFAULT 0,
+    next_retry_at   DATETIME,
+    updated_at      DATETIME NOT NULL
+);
+INSERT OR IGNORE INTO feishu_sync_state (id, updated_at) VALUES (1, CURRENT_TIMESTAMP);
+`
+
+const appSettingsSchema = `
+CREATE TABLE IF NOT EXISTS app_settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at DATETIME NOT NULL
+);
 `
 
 // SQLite time formats we accept when scanning. modernc.org/sqlite serializes
@@ -125,6 +209,20 @@ func migrateStep(db *sql.DB, from int) error {
 		// populated, so existing items/pins/raw content are preserved.
 		if _, err := db.Exec(schema); err != nil {
 			return fmt.Errorf("apply baseline schema: %w", err)
+		}
+		return nil
+	case 1:
+		// 1 -> 2: add the personal-workbench tables alongside the existing
+		// feed items. No items table is rebuilt or rewritten.
+		if _, err := db.Exec(workbenchSchema); err != nil {
+			return fmt.Errorf("apply workbench schema: %w", err)
+		}
+		return nil
+	case 2:
+		// 2 -> 3: add small, globally persisted application preferences. This
+		// table is independent of feed and workbench data.
+		if _, err := db.Exec(appSettingsSchema); err != nil {
+			return fmt.Errorf("apply app settings schema: %w", err)
 		}
 		return nil
 	default:

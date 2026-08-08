@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -61,6 +62,148 @@ func TestHealthDoesNotRequireAuth(t *testing.T) {
 	defer protectedResp.Body.Close()
 	if protectedResp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("/api/items without auth status = %d, want 401", protectedResp.StatusCode)
+	}
+}
+
+func TestFrontendConfigDefaultView(t *testing.T) {
+	tests := []struct {
+		name string
+		view string
+		want string
+	}{
+		{name: "default", want: "workbench"},
+		{name: "infowall", view: "infowall", want: "infowall"},
+		{name: "workbench", view: "workbench", want: "workbench"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, err := New(context.Background(), Config{
+				DBPath:      filepath.Join(t.TempDir(), "infowall.db"),
+				APIKey:      "secret",
+				DefaultView: tt.view,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer srv.Close()
+
+			httpSrv := httptest.NewServer(srv.mux)
+			defer httpSrv.Close()
+			resp, err := http.Get(httpSrv.URL + "/api/config")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("config status = %d, want 200", resp.StatusCode)
+			}
+			var payload struct {
+				DefaultView string `json:"default_view"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.DefaultView != tt.want {
+				t.Fatalf("default_view = %q, want %q", payload.DefaultView, tt.want)
+			}
+		})
+	}
+}
+
+func TestInvalidFrontendDefaultView(t *testing.T) {
+	srv, err := New(context.Background(), Config{
+		DBPath:      filepath.Join(t.TempDir(), "infowall.db"),
+		DefaultView: "dashboard",
+	})
+	if err == nil {
+		srv.Close()
+		t.Fatal("New accepted an invalid default view")
+	}
+	if !strings.Contains(err.Error(), "want infowall or workbench") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestFrontendConfigUpdatePersistsAndRequiresAuth(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "infowall.db")
+	srv, err := New(context.Background(), Config{
+		DBPath:      dbPath,
+		APIKey:      "secret",
+		DefaultView: "workbench",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpSrv := httptest.NewServer(srv.mux)
+
+	patch := func(value, key string) *http.Response {
+		t.Helper()
+		body, err := json.Marshal(map[string]string{"default_view": value})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, err := http.NewRequest(http.MethodPatch, httpSrv.URL+"/api/config", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		if key != "" {
+			request.Header.Set("Authorization", "Bearer "+key)
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+
+	unauthorized := patch("infowall", "")
+	unauthorized.Body.Close()
+	if unauthorized.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthorized PATCH status = %d, want 401", unauthorized.StatusCode)
+	}
+
+	invalid := patch("dashboard", "secret")
+	invalid.Body.Close()
+	if invalid.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid PATCH status = %d, want 400", invalid.StatusCode)
+	}
+
+	updated := patch("infowall", "secret")
+	if updated.StatusCode != http.StatusOK {
+		updated.Body.Close()
+		t.Fatalf("PATCH status = %d, want 200", updated.StatusCode)
+	}
+	var payload map[string]string
+	if err := json.NewDecoder(updated.Body).Decode(&payload); err != nil {
+		updated.Body.Close()
+		t.Fatal(err)
+	}
+	updated.Body.Close()
+	if payload["default_view"] != "infowall" {
+		t.Fatalf("PATCH payload = %#v", payload)
+	}
+
+	httpSrv.Close()
+	if err := srv.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := New(context.Background(), Config{
+		DBPath:      dbPath,
+		DefaultView: "workbench",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	value, found, err := reopened.store.GetSetting(context.Background(), defaultViewSettingKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || value != "infowall" || reopened.cfg.DefaultView != "infowall" {
+		t.Fatalf("persisted default = (%q, %v), cfg=%q", value, found, reopened.cfg.DefaultView)
 	}
 }
 

@@ -15,20 +15,26 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/infowall/infowall/internal/feed"
+	"github.com/infowall/infowall/internal/feishusync"
 	"github.com/infowall/infowall/internal/parser"
 	"github.com/infowall/infowall/internal/store"
 )
 
 // Config holds server options.
 type Config struct {
-	Addr   string
-	DBPath string
-	Dev    bool   // true → proxy frontend to Vite dev server on :5173
-	APIKey string // optional; if set, requests must carry Authorization: Bearer <key> or ?key=<key>
-	DistFS fs.FS  // embedded production frontend (ignored in Dev mode)
+	Addr        string
+	DBPath      string
+	Dev         bool   // true → proxy frontend to Vite dev server on :5173
+	APIKey      string // optional; if set, requests must carry Authorization: Bearer <key> or ?key=<key>
+	DistFS      fs.FS  // embedded production frontend (ignored in Dev mode)
+	DefaultView string // "infowall" or "workbench"; used when the browser URL has no valid hash route
+
+	// LarkRunner is injectable for tests. Production uses lark-cli from PATH.
+	LarkRunner feishusync.CommandRunner
 }
 
 // Server wires together store, hub, and HTTP routes.
@@ -37,6 +43,21 @@ type Server struct {
 	store *store.Store
 	hub   *feed.Hub
 	mux   *http.ServeMux
+
+	feishuClient feishusync.Client
+	syncWorker   *feishusync.Worker
+	syncCancel   context.CancelFunc
+	syncWG       sync.WaitGroup
+}
+
+const defaultViewSettingKey = "default_view"
+
+func normalizeDefaultView(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value != "infowall" && value != "workbench" {
+		return "", fmt.Errorf("invalid default view %q (want infowall or workbench)", value)
+	}
+	return value, nil
 }
 
 // New constructs a Server and opens the SQLite store.
@@ -47,9 +68,36 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 	if cfg.DBPath == "" {
 		cfg.DBPath = "infowall.db"
 	}
+	if cfg.DefaultView == "" {
+		cfg.DefaultView = "workbench"
+	}
+	var err error
+	cfg.DefaultView, err = normalizeDefaultView(cfg.DefaultView)
+	if err != nil {
+		return nil, err
+	}
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
 		return nil, fmt.Errorf("open database %s: %w", cfg.DBPath, err)
+	}
+	settingsContext := ctx
+	if settingsContext == nil {
+		settingsContext = context.Background()
+	}
+	persistedView, found, err := st.GetSetting(settingsContext, defaultViewSettingKey)
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+	if found {
+		cfg.DefaultView, err = normalizeDefaultView(persistedView)
+		if err != nil {
+			st.Close()
+			return nil, fmt.Errorf("persisted frontend config: %w", err)
+		}
+	} else if err := st.SetSetting(settingsContext, defaultViewSettingKey, cfg.DefaultView); err != nil {
+		st.Close()
+		return nil, err
 	}
 	s := &Server{
 		cfg:   cfg,
@@ -57,12 +105,33 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 		hub:   feed.NewHub(),
 		mux:   http.NewServeMux(),
 	}
+	runner := cfg.LarkRunner
+	if runner == nil {
+		runner = feishusync.ExecRunner{}
+	}
+	s.feishuClient = feishusync.Client{Runner: runner}
+	s.syncWorker = feishusync.NewWorker(&feishuBackend{store: st}, s.feishuClient)
+	s.syncWorker.OnUpdate = s.broadcastFeishuSyncState
+	workerContext := ctx
+	if workerContext == nil {
+		workerContext = context.Background()
+	}
+	workerContext, s.syncCancel = context.WithCancel(workerContext)
+	s.syncWG.Add(1)
+	go func() {
+		defer s.syncWG.Done()
+		s.syncWorker.Run(workerContext)
+	}()
 	s.routes()
 	return s, nil
 }
 
 // Close releases resources held by the server (e.g. the database).
 func (s *Server) Close() error {
+	if s.syncCancel != nil {
+		s.syncCancel()
+		s.syncWG.Wait()
+	}
 	if s.store != nil {
 		return s.store.Close()
 	}
@@ -73,11 +142,27 @@ func (s *Server) routes() {
 	api := chain(s.logRequest, s.auth)
 
 	s.mux.HandleFunc("GET /api/health", s.logRequest(s.handleHealth))
+	s.mux.HandleFunc("GET /api/config", s.logRequest(s.handleFrontendConfig))
+	s.mux.HandleFunc("PATCH /api/config", api(s.handleUpdateFrontendConfig))
 	s.mux.HandleFunc("GET /api/items", api(s.handleListItems))
 	s.mux.HandleFunc("GET /api/items/{id}", api(s.handleGetItem))
 	s.mux.HandleFunc("POST /api/items", api(s.handleCreateItem))
 	s.mux.HandleFunc("POST /api/items/{id}/pin", api(s.handlePinItem))
 	s.mux.HandleFunc("DELETE /api/items/{id}", api(s.handleDeleteItem))
+	s.mux.HandleFunc("GET /api/demands", api(s.handleListDemands))
+	s.mux.HandleFunc("POST /api/demands", api(s.handleCreateDemand))
+	s.mux.HandleFunc("POST /api/demands/import", api(s.handleImportDemands))
+	s.mux.HandleFunc("GET /api/demands/{id}", api(s.handleGetDemand))
+	s.mux.HandleFunc("PATCH /api/demands/{id}", api(s.handlePatchDemand))
+	s.mux.HandleFunc("POST /api/demands/{id}/progress", api(s.handleAddDemandProgress))
+	s.mux.HandleFunc("GET /api/projects", api(s.handleListProjects))
+	s.mux.HandleFunc("POST /api/projects", api(s.handleCreateProject))
+	s.mux.HandleFunc("GET /api/projects/{id}", api(s.handleGetProject))
+	s.mux.HandleFunc("PATCH /api/projects/{id}", api(s.handlePatchProject))
+	s.mux.HandleFunc("GET /api/integrations/feishu-doc", api(s.handleGetFeishuDoc))
+	s.mux.HandleFunc("POST /api/integrations/feishu-doc", api(s.handleSetupFeishuDoc))
+	s.mux.HandleFunc("DELETE /api/integrations/feishu-doc", api(s.handleDisableFeishuDoc))
+	s.mux.HandleFunc("POST /api/integrations/feishu-doc/sync", api(s.handleSyncFeishuDoc))
 
 	// SSE endpoint: same auth as API (accepts ?key= for EventSource), also logged.
 	s.mux.HandleFunc("GET /events", s.logRequest(s.auth(s.handleEvents)))
@@ -129,7 +214,7 @@ func (s *Server) ListenAndServe() error {
 		WriteTimeout: 0, // SSE connections stay open indefinitely
 		IdleTimeout:  60 * time.Second,
 	}
-	log.Printf("infowall listening on %s (dev=%v, db=%s)", s.cfg.Addr, s.cfg.Dev, s.cfg.DBPath)
+	log.Printf("infowall listening on %s (dev=%v, db=%s, default_view=%s)", s.cfg.Addr, s.cfg.Dev, s.cfg.DBPath, s.cfg.DefaultView)
 	return srv.ListenAndServe()
 }
 
@@ -142,6 +227,42 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":  "ok",
 		"ts":      time.Now().UTC(),
 	})
+}
+
+func (s *Server) handleFrontendConfig(w http.ResponseWriter, r *http.Request) {
+	defaultView, found, err := s.store.GetSetting(r.Context(), defaultViewSettingKey)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !found {
+		defaultView = s.cfg.DefaultView
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"default_view": defaultView,
+	})
+}
+
+func (s *Server) handleUpdateFrontendConfig(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		DefaultView string `json:"default_view"`
+	}
+	if err := decodeJSON(r, &request); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	defaultView, err := normalizeDefaultView(request.DefaultView)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.store.SetSetting(r.Context(), defaultViewSettingKey, defaultView); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	payload := map[string]string{"default_view": defaultView}
+	s.broadcast("config.updated", payload)
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) handleListItems(w http.ResponseWriter, r *http.Request) {

@@ -48,7 +48,7 @@ export function ItemCard({
         item.pinned ? "ring-1 ring-[hsl(var(--accent)/0.4)]" : "",
         isCollapsed
           ? "p-3 hover:shadow-md cursor-pointer"
-          : "p-5 hover:shadow-md sm:p-6"
+          : "p-3.5 hover:shadow-md sm:p-5 lg:p-6"
       )}
       onClick={isCollapsible ? toggleCollapse : undefined}
       role={isCollapsible ? "button" : undefined}
