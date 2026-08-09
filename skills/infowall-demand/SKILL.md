@@ -15,6 +15,8 @@ Turn recent Feishu conversations into a small, auditable set of tracked demands.
 
 The automatic schedule is Asia/Shanghai 09:00–23:00 every 30 minutes, including the 23:00 slot. It uses `[last_success_end-5m, now]`; the `page_token` is window-local and never becomes a cross-run watermark. The service performs a 48-hour daily catch-up and bounds first-run or long-outage recovery to seven days split into daily windows.
 
+Automatic ingestion has a server-enforced current-user relevance gate before Codex is started. Direct chats remain eligible. In group and topic chats, only messages authored by the authenticated user, explicitly @mentioning that user, or belonging to a thread in which that user participated may be candidate messages. Treat any unrelated group chatter that somehow appears in the input as `skipped`; never create or update a demand from it. Do not infer relevance from a shared team, a broad project keyword, `@all`, or mere presence in the same group.
+
 ## Collect the bounded window
 
 1. Default to Monday 00:00:00 of the current calendar week through now in UTC+08:00. Honor an explicitly requested window instead.
@@ -39,6 +41,8 @@ lark-cli im +messages-search \
 ## Classify conservatively
 
 Create a candidate only when a message expresses a concrete outcome worth tracking across time: a requested investigation, deliverable, decision, follow-up, or multi-step task. Exclude greetings, status chatter, FYIs without action, already-completed one-off answers, and speculative ideas without commitment.
+
+For manual scans, apply the same current-user relevance rule before synthesis: p2p conversations are in scope; group/topic messages require the user as sender, an explicit @mention of the user, or direct participation in the same thread. When current-user identity cannot be resolved, fail closed for group/topic chats rather than importing broad group traffic.
 
 Use one demand for one trackable outcome, not one demand per message. Merge nearby messages that clearly describe the same outcome. Keep uncertainty explicit in the description instead of inventing owners, deadlines, priority, or project membership.
 

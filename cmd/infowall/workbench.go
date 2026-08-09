@@ -605,6 +605,8 @@ Usage:
   infowall scan feishu disable [client flags]
 
 The default schedule is Asia/Shanghai 09:00–23:00 every 30 minutes with a 5-minute overlap.
+Direct chats are eligible; group/topic messages are analyzed only when sent by you, explicitly @mentioning you,
+or in a thread where you participated. The current Feishu identity is resolved automatically from lark-cli auth status.
 Use --resume-from RFC3339 only once when a prior manual scan has an audited completion watermark.
 Client flags: --server URL --api-key KEY --json`)
 }

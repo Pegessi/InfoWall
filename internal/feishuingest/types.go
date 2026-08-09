@@ -23,6 +23,16 @@ type Message struct {
 	URL         string    `json:"url,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	Deleted     bool      `json:"deleted"`
+	Mentions    []Mention `json:"mentions,omitempty"`
+}
+
+// Mention is the stable identity-bearing part of an @mention returned by
+// lark-cli. The collector uses ID as the primary self-relevance signal and only
+// falls back to Name when the API omitted an ID.
+type Mention struct {
+	ID   string `json:"id"`
+	Key  string `json:"key,omitempty"`
+	Name string `json:"name,omitempty"`
 }
 
 type Collection struct {

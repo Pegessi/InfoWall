@@ -85,6 +85,23 @@ func TestWorkerDoesNotStartCodexWithoutNewHumanMessages(t *testing.T) {
 	}
 }
 
+func TestWorkerDoesNotStartCodexForUnrelatedGroupTraffic(t *testing.T) {
+	messages := []Message{{ID: "noise", ChatID: "large-group", ChatType: "group",
+		SenderID: "ou_other", SenderType: "user", Content: "另一个团队的普通讨论"}}
+	contextMessages, candidates := selfRelevantMessages(messages, selfIdentity{OpenID: "ou_me", Name: "当前用户"})
+	backend := &fakeBackend{newIDs: map[string]bool{}}
+	analyzer := &fakeAnalyzer{}
+	worker := NewWorker(backend, fakeCollector{result: Collection{
+		Messages: contextMessages, Candidates: candidates, Seen: len(messages),
+	}}, analyzer)
+	if err := worker.runWindow(context.Background(), "manual", time.Now().Add(-time.Hour), time.Now(), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if analyzer.calls != 0 || len(backend.completed) != 1 || backend.completed[0].MessagesCandidate != 0 {
+		t.Fatalf("unrelated group traffic reached Codex: calls=%d commits=%+v", analyzer.calls, backend.completed)
+	}
+}
+
 func TestWorkerFailureDoesNotCompleteWindow(t *testing.T) {
 	message := Message{ID: "new", SenderType: "user", Content: "new demand"}
 	backend := &fakeBackend{newIDs: map[string]bool{"new": true}}

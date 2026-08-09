@@ -238,6 +238,7 @@ function IngestionBar({ integration, latestRun, busy, onScan }: {
           </div>
           <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[hsl(var(--muted-foreground))]">
             {enabled && <span>{integration?.activeStart}–{integration?.activeEnd} · 每 {integration?.intervalMinutes} 分钟</span>}
+            {enabled && <span title="群聊仅保留我发送、明确 @我，或我参与线程中的消息">范围：私聊 + 与我有关的群聊</span>}
             <span>最近成功：{formatDate(integration?.lastSuccessEnd)}</span>
             {enabled && <span>下次：{formatDate(integration?.nextRunAt)}</span>}
             {latestRun?.status === "success" && <span>上轮：新建 {latestRun.created} · 更新 {latestRun.updated} · 审核 {latestRun.reviewCount} · 跳过 {latestRun.skipped}</span>}
