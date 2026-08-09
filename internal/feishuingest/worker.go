@@ -14,6 +14,7 @@ type Backend interface {
 	GetFeishuIngestionState(context.Context) (*model.FeishuIngestionState, error)
 	SetFeishuIngestionNextRun(context.Context, time.Time) error
 	StartFeishuIngestionRun(context.Context, string, time.Time, time.Time, time.Duration) (*model.FeishuIngestionRun, error)
+	RenewFeishuIngestionLease(context.Context, string, time.Duration) error
 	FailFeishuIngestionRun(context.Context, string, string, int, int) error
 	CompleteFeishuIngestion(context.Context, model.FeishuIngestionCommit) (*model.FeishuIngestionRun, error)
 	FilterNewFeishuMessageIDs(context.Context, []string) (map[string]bool, error)
@@ -105,7 +106,7 @@ func (w *Worker) check(ctx context.Context) {
 }
 
 func (w *Worker) runWindow(ctx context.Context, trigger string, start, end time.Time, backfillAt *time.Time, excluded []string) error {
-	run, err := w.Backend.StartFeishuIngestionRun(ctx, trigger, start, end, 15*time.Minute)
+	run, err := w.Backend.StartFeishuIngestionRun(ctx, trigger, start, end, 20*time.Minute)
 	if err != nil {
 		return err
 	}
@@ -147,10 +148,18 @@ func (w *Worker) runWindow(ctx context.Context, trigger string, start, end time.
 		resources = w.Enricher.Enrich(ctx, collection.Messages)
 	}
 	batches := buildAnalysisBatches(start, end, collection.Messages, newCandidates, snapshot, resources)
-	result, err := w.Analyzer.Analyze(ctx, batches)
-	if err != nil {
-		_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, err.Error(), collection.Seen, len(newCandidates))
-		return err
+	var result Result
+	for _, request := range chunkAnalysisBatches(batches, 40) {
+		if err := w.Backend.RenewFeishuIngestionLease(ctx, run.ID, 20*time.Minute); err != nil {
+			_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, err.Error(), collection.Seen, len(newCandidates))
+			return err
+		}
+		partial, analyzeErr := w.Analyzer.Analyze(ctx, request)
+		if analyzeErr != nil {
+			_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, analyzeErr.Error(), collection.Seen, len(newCandidates))
+			return analyzeErr
+		}
+		mergeAnalysisResult(&result, partial)
 	}
 	commit.InputTokens = result.InputTokens
 	commit.CachedInputTokens = result.CachedInputTokens
@@ -191,6 +200,68 @@ func (w *Worker) runWindow(ctx context.Context, trigger string, start, end time.
 	}
 	_, err = w.Backend.CompleteFeishuIngestion(ctx, commit)
 	return err
+}
+
+func chunkAnalysisBatches(batches []AnalysisInput, candidateLimit int) [][]AnalysisInput {
+	if candidateLimit <= 0 {
+		candidateLimit = 40
+	}
+	normalized := make([]AnalysisInput, 0, len(batches))
+	for _, batch := range batches {
+		if len(batch.Candidates) <= candidateLimit {
+			normalized = append(normalized, batch)
+			continue
+		}
+		for offset := 0; offset < len(batch.Candidates); offset += candidateLimit {
+			end := offset + candidateLimit
+			if end > len(batch.Candidates) {
+				end = len(batch.Candidates)
+			}
+			candidates := append([]Message(nil), batch.Candidates[offset:end]...)
+			messages := boundedContext(batch.Messages, candidates, 120)
+			resources := make([]Resource, 0)
+			for _, message := range messages {
+				resources = append(resources, resourcesForMessage(message, batch.Resources)...)
+			}
+			normalized = append(normalized, AnalysisInput{
+				WindowStart: batch.WindowStart,
+				WindowEnd:   batch.WindowEnd,
+				Messages:    messages,
+				Candidates:  candidates,
+				Snapshot:    batch.Snapshot,
+				Resources:   dedupeResources(resources),
+			})
+		}
+	}
+
+	result := make([][]AnalysisInput, 0)
+	current := make([]AnalysisInput, 0)
+	count := 0
+	for _, batch := range normalized {
+		batchCount := len(batch.Candidates)
+		if len(current) > 0 && count+batchCount > candidateLimit {
+			result = append(result, current)
+			current = make([]AnalysisInput, 0)
+			count = 0
+		}
+		current = append(current, batch)
+		count += batchCount
+	}
+	if len(current) > 0 {
+		result = append(result, current)
+	}
+	return result
+}
+
+func mergeAnalysisResult(destination *Result, source Result) {
+	destination.NewDemands = append(destination.NewDemands, source.NewDemands...)
+	destination.ProgressUpdates = append(destination.ProgressUpdates, source.ProgressUpdates...)
+	destination.Reviews = append(destination.Reviews, source.Reviews...)
+	destination.SkippedMessageIDs = append(destination.SkippedMessageIDs, source.SkippedMessageIDs...)
+	destination.MissingContextIDs = append(destination.MissingContextIDs, source.MissingContextIDs...)
+	destination.InputTokens += source.InputTokens
+	destination.CachedInputTokens += source.CachedInputTokens
+	destination.OutputTokens += source.OutputTokens
 }
 
 func buildAnalysisBatches(start, end time.Time, messages, candidates []Message, snapshot Snapshot, resources []Resource) []AnalysisInput {
@@ -347,6 +418,9 @@ func (w *Worker) updated() {
 }
 
 func scheduledDue(state model.FeishuIngestionState, now time.Time) bool {
+	if state.NextRunAt != nil && now.UTC().Before(state.NextRunAt.UTC()) {
+		return false
+	}
 	start, end, err := activeBounds(state, now)
 	if err != nil || now.Before(start) || now.After(end.Add(time.Minute)) {
 		return false

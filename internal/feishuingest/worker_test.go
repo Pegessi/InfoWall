@@ -35,6 +35,7 @@ type fakeBackend struct {
 	newIDs    map[string]bool
 	completed []model.FeishuIngestionCommit
 	failed    int
+	renewed   int
 	snapshot  Snapshot
 }
 
@@ -45,6 +46,10 @@ func (backend *fakeBackend) GetFeishuIngestionState(context.Context) (*model.Fei
 func (backend *fakeBackend) SetFeishuIngestionNextRun(context.Context, time.Time) error { return nil }
 func (backend *fakeBackend) StartFeishuIngestionRun(_ context.Context, trigger string, start, end time.Time, _ time.Duration) (*model.FeishuIngestionRun, error) {
 	return &model.FeishuIngestionRun{ID: uuid.NewString(), Trigger: trigger, WindowStart: start, WindowEnd: end}, nil
+}
+func (backend *fakeBackend) RenewFeishuIngestionLease(context.Context, string, time.Duration) error {
+	backend.renewed++
+	return nil
 }
 func (backend *fakeBackend) FailFeishuIngestionRun(context.Context, string, string, int, int) error {
 	backend.failed++
@@ -131,5 +136,50 @@ func TestAnalysisBatchesAreSeparatedByConversationAndContextIsBounded(t *testing
 		if len(batch.Candidates) != 1 {
 			t.Fatalf("conversation candidates mixed: %+v", batch.Candidates)
 		}
+	}
+}
+
+func TestAnalysisBatchesSplitLargeConversationAndRespectCandidateLimit(t *testing.T) {
+	start := time.Now().Add(-time.Hour)
+	messages := make([]Message, 0, 95)
+	for index := 0; index < 95; index++ {
+		messages = append(messages, Message{ID: uuid.NewString(), ChatID: "chat-a", CreatedAt: start.Add(time.Duration(index) * time.Second)})
+	}
+	input := AnalysisInput{WindowStart: start, WindowEnd: time.Now(), Messages: messages, Candidates: messages}
+	requests := chunkAnalysisBatches([]AnalysisInput{input}, 40)
+	if len(requests) != 3 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	total := 0
+	for _, request := range requests {
+		count := 0
+		for _, batch := range request {
+			count += len(batch.Candidates)
+			if len(batch.Messages) > 120 {
+				t.Fatalf("message context = %d", len(batch.Messages))
+			}
+		}
+		if count > 40 {
+			t.Fatalf("candidate count = %d", count)
+		}
+		total += count
+	}
+	if total != len(messages) {
+		t.Fatalf("candidate total = %d", total)
+	}
+}
+
+func TestScheduledDueRespectsPersistedNextRunAfterFailure(t *testing.T) {
+	location, _ := time.LoadLocation("Asia/Shanghai")
+	now := time.Date(2026, 8, 9, 10, 12, 0, 0, location)
+	last := now.Add(-time.Hour).UTC()
+	next := time.Date(2026, 8, 9, 10, 30, 0, 0, location).UTC()
+	state := model.FeishuIngestionState{ActiveStart: "09:00", ActiveEnd: "23:00", IntervalMinutes: 30,
+		LastSuccessEnd: &last, NextRunAt: &next}
+	if scheduledDue(state, now) {
+		t.Fatal("failed scheduled run retried before next_run_at")
+	}
+	if !scheduledDue(state, next.In(location)) {
+		t.Fatal("next scheduled slot should be due")
 	}
 }

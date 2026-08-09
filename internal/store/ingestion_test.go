@@ -113,6 +113,35 @@ func TestFeishuIngestionFailureDoesNotAdvanceWatermark(t *testing.T) {
 	}
 }
 
+func TestFeishuIngestionLeaseRenewalAndDisabledFailureState(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	state := enableIngestion(t, st)
+	end := time.Now().UTC()
+	run, err := st.StartFeishuIngestionRun(ctx, "manual", end.Add(-time.Hour), end, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RenewFeishuIngestionLease(ctx, run.ID, 20*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	renewed, err := st.GetFeishuIngestionState(ctx)
+	if err != nil || renewed.LeaseUntil == nil || renewed.LeaseUntil.Before(time.Now().UTC().Add(19*time.Minute)) {
+		t.Fatalf("lease was not renewed: state=%+v err=%v", renewed, err)
+	}
+	state.Enabled = false
+	if _, err := st.ConfigureFeishuIngestion(ctx, state, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FailFeishuIngestionRun(ctx, run.ID, "cancelled while disabled", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	disabled, err := st.GetFeishuIngestionState(ctx)
+	if err != nil || disabled.Status != "disabled" || disabled.CurrentRunID != "" {
+		t.Fatalf("disabled failure state = %+v err=%v", disabled, err)
+	}
+}
+
 func TestAutomaticProgressConfidenceGateAndReviewResolution(t *testing.T) {
 	st := openTemp(t)
 	ctx := context.Background()

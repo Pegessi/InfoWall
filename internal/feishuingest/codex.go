@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -51,13 +52,14 @@ func (a CodexAnalyzer) Analyze(ctx context.Context, batches []AnalysisInput) (Re
 	}
 	timeout := a.Timeout
 	if timeout <= 0 {
-		timeout = 5 * time.Minute
+		timeout = 10 * time.Minute
 	}
 	runContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	prompt := analysisPrompt + "\n\n<infowall_ingestion_input>\n" + string(inputJSON) + "\n</infowall_ingestion_input>"
-	command := exec.CommandContext(runContext, path, "exec", "--ephemeral", "--sandbox", "read-only",
+	command := exec.Command(path, "exec", "--ephemeral", "--sandbox", "read-only",
 		"--output-schema", schemaPath, "--output-last-message", outputPath, "--json", "-")
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if a.CWD != "" {
 		command.Dir = a.CWD
 	}
@@ -65,11 +67,26 @@ func (a CodexAnalyzer) Analyze(ctx context.Context, batches []AnalysisInput) (Re
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
+	if err := command.Start(); err != nil {
+		return Result{}, fmt.Errorf("start codex analysis: %w", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			return Result{}, fmt.Errorf("codex analysis failed: %s", safeCommandError(stderr.String(), err))
+		}
+	case <-runContext.Done():
+		// codex is a Node launcher which starts a native child. Killing only the
+		// launcher leaves that child holding stdout/stderr pipes, so Wait never
+		// returns. A dedicated process group makes timeout/cancellation complete.
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		<-done
 		if errors.Is(runContext.Err(), context.DeadlineExceeded) {
 			return Result{}, fmt.Errorf("codex analysis timed out after %s", timeout)
 		}
-		return Result{}, fmt.Errorf("codex analysis failed: %s", safeCommandError(stderr.String(), err))
+		return Result{}, runContext.Err()
 	}
 	raw, err := os.ReadFile(outputPath)
 	if err != nil {

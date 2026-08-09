@@ -231,12 +231,32 @@ func (s *Store) FailFeishuIngestionRun(ctx context.Context, runID, message strin
 		seen, candidates, truncateError(message), now, runID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE feishu_ingestion_state SET status = 'error',
+	if _, err := tx.ExecContext(ctx, `UPDATE feishu_ingestion_state SET
+		status = CASE WHEN enabled = 1 THEN 'error' ELSE 'disabled' END,
 		last_error = ?, current_run_id = '', lease_until = NULL, updated_at = ?
 		WHERE id = 1 AND current_run_id = ?`, truncateError(message), now, runID); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *Store) RenewFeishuIngestionLease(ctx context.Context, runID string, lease time.Duration) error {
+	if lease <= 0 {
+		lease = 20 * time.Minute
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE feishu_ingestion_state SET lease_until = ?, updated_at = ?
+		WHERE id = 1 AND enabled = 1 AND current_run_id = ?`, time.Now().UTC().Add(lease), time.Now().UTC(), runID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("%w: ingestion run %s no longer holds the lease", ErrConflict, runID)
+	}
+	return nil
 }
 
 func (s *Store) FilterNewFeishuMessageIDs(ctx context.Context, ids []string) (map[string]bool, error) {

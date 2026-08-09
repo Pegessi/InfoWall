@@ -29,6 +29,10 @@ func (b *ingestionBackend) StartFeishuIngestionRun(ctx context.Context, trigger 
 	return b.store.StartFeishuIngestionRun(ctx, trigger, start, end, lease)
 }
 
+func (b *ingestionBackend) RenewFeishuIngestionLease(ctx context.Context, runID string, lease time.Duration) error {
+	return b.store.RenewFeishuIngestionLease(ctx, runID, lease)
+}
+
 func (b *ingestionBackend) FailFeishuIngestionRun(ctx context.Context, runID, message string, seen, candidates int) error {
 	return b.store.FailFeishuIngestionRun(ctx, runID, message, seen, candidates)
 }
