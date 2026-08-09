@@ -125,7 +125,7 @@ func buildAgentSpec() agentSpec {
 			{Path: "demand progress ID --text TEXT [--source JSON] --json", Writes: true, Input: "flags", Output: "progress", Idempotency: "Not retry-safe with source evidence; use demand apply for scanned Feishu evidence."},
 			{Path: "project create|list|update|archive ... --json", Writes: true, Input: "flags", Output: "project or {projects:[...]}"},
 			{Path: "sync feishu setup|status|now|disable ... --json", Writes: true, Input: "flags", Output: "Feishu sync state"},
-			{Path: "scan feishu setup|status|now|runs|disable ... --json", Writes: true, Input: "flags", Output: "Feishu ingestion state or run history", Idempotency: "Stable message/source/progress keys make overlapping windows retry-safe."},
+			{Path: "scan feishu setup|status|now|runs|disable ... --json", Writes: true, Input: "flags; setup accepts one-time --resume-from RFC3339 for an audited prior manual scan", Output: "Feishu ingestion state or run history", Idempotency: "Stable message/source/progress keys make overlapping windows retry-safe."},
 			{Path: "demand review list|accept|dismiss ... --json", Writes: true, Input: "flags", Output: "ambiguous progress review(s)"},
 		},
 		Errors: map[string]any{

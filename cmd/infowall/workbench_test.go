@@ -86,7 +86,7 @@ func TestScanFeishuSetupAndReviewAcceptCLI(t *testing.T) {
 	}))
 	defer srv.Close()
 	if _, stderr, err := captureCommandOutput(t, func() error {
-		return run([]string{"scan", "feishu", "setup", "--exclude-chat", "oc_skip", "--server", srv.URL, "--json"})
+		return run([]string{"scan", "feishu", "setup", "--exclude-chat", "oc_skip", "--resume-from", "2026-08-08T16:25:12Z", "--server", srv.URL, "--json"})
 	}); err != nil {
 		t.Fatalf("scan setup failed: %v stderr=%s", err, stderr)
 	}
@@ -100,6 +100,9 @@ func TestScanFeishuSetupAndReviewAcceptCLI(t *testing.T) {
 	}
 	if requests[0].body["enabled"] != true || requests[0].body["interval_minutes"] != float64(30) {
 		t.Fatalf("unexpected setup body: %+v", requests[0].body)
+	}
+	if requests[0].body["resume_from"] != "2026-08-08T16:25:12Z" {
+		t.Fatalf("resume watermark lost: %+v", requests[0].body)
 	}
 	if requests[1].path != "/api/demand-reviews/review-1/accept" || requests[1].body["demand_id"] != "demand-1" {
 		t.Fatalf("unexpected review request: %+v", requests[1])

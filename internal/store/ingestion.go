@@ -65,7 +65,7 @@ func optionalSQLiteTime(raw any) *time.Time {
 	return nil
 }
 
-func (s *Store) ConfigureFeishuIngestion(ctx context.Context, state model.FeishuIngestionState) (*model.FeishuIngestionState, error) {
+func (s *Store) ConfigureFeishuIngestion(ctx context.Context, state model.FeishuIngestionState, resumeFrom *time.Time) (*model.FeishuIngestionState, error) {
 	if state.Timezone == "" {
 		state.Timezone = "Asia/Shanghai"
 	}
@@ -91,13 +91,30 @@ func (s *Store) ConfigureFeishuIngestion(ctx context.Context, state model.Feishu
 		status = "idle"
 	}
 	now := time.Now().UTC()
+	var resumeAt, backfillAt any
+	if resumeFrom != nil {
+		resumeAt = resumeFrom.UTC()
+		backfillAt = now
+		var existingRuns int
+		var existingSuccess any
+		if err := s.db.QueryRowContext(ctx, `SELECT
+			(SELECT count(*) FROM feishu_ingestion_runs), last_success_end
+			FROM feishu_ingestion_state WHERE id = 1`).Scan(&existingRuns, &existingSuccess); err != nil {
+			return nil, err
+		}
+		if existingRuns != 0 || optionalSQLiteTime(existingSuccess) != nil {
+			return nil, errors.New("resume_from is only allowed before the first ingestion run")
+		}
+	}
 	_, err = s.db.ExecContext(ctx, `UPDATE feishu_ingestion_state SET
 		enabled = ?, timezone = ?, active_start = ?, active_end = ?,
 		interval_minutes = ?, overlap_minutes = ?, excluded_chat_ids = ?,
+		last_success_end = COALESCE(?, last_success_end),
+		last_backfill_at = COALESCE(?, last_backfill_at),
 		status = ?, last_error = '', requested = CASE WHEN ? = 1 THEN requested ELSE 0 END,
 		next_run_at = CASE WHEN ? = 1 THEN next_run_at ELSE NULL END, updated_at = ?
 		WHERE id = 1`, boolInt(state.Enabled), state.Timezone, state.ActiveStart,
-		state.ActiveEnd, state.IntervalMinutes, state.OverlapMinutes, string(raw), status,
+		state.ActiveEnd, state.IntervalMinutes, state.OverlapMinutes, string(raw), resumeAt, backfillAt, status,
 		boolInt(state.Enabled), boolInt(state.Enabled), now)
 	if err != nil {
 		return nil, fmt.Errorf("configure Feishu ingestion: %w", err)

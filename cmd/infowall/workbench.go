@@ -572,6 +572,7 @@ Usage:
   infowall scan feishu disable [client flags]
 
 The default schedule is Asia/Shanghai 09:00–23:00 every 30 minutes with a 5-minute overlap.
+Use --resume-from RFC3339 only once when a prior manual scan has an audited completion watermark.
 Client flags: --server URL --api-key KEY --json`)
 }
 
@@ -590,6 +591,7 @@ func cmdScanFeishuSetup(args []string) error {
 	end := fs.String("end", "23:00", "daily active end HH:MM")
 	interval := fs.Int("interval", 30, "scan interval in minutes")
 	overlap := fs.Int("overlap", 5, "watermark overlap in minutes")
+	resumeFrom := fs.String("resume-from", "", "one-time audited prior scan watermark (RFC3339)")
 	var exclusions repeatedString
 	fs.Var(&exclusions, "exclude-chat", "chat id to exclude; repeat for multiple chats")
 	cfg := addClientFlags(fs)
@@ -600,6 +602,7 @@ func cmdScanFeishuSetup(args []string) error {
 	payload := map[string]any{"enabled": true, "timezone": *timezone, "active_start": *start,
 		"active_end": *end, "interval_minutes": *interval, "overlap_minutes": *overlap,
 		"excluded_chat_ids": []string(exclusions)}
+	putNonEmpty(payload, "resume_from", *resumeFrom)
 	return requestAndPrint(cfg, http.MethodPatch, feishuChatPath, payload)
 }
 

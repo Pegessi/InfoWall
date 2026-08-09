@@ -13,7 +13,7 @@ func enableIngestion(t *testing.T, st *Store) model.FeishuIngestionState {
 	state, err := st.ConfigureFeishuIngestion(context.Background(), model.FeishuIngestionState{
 		Enabled: true, Timezone: "Asia/Shanghai", ActiveStart: "09:00", ActiveEnd: "23:00",
 		IntervalMinutes: 30, OverlapMinutes: 5, ExcludedChatIDs: []string{},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,6 +65,27 @@ func TestFeishuIngestionCommitIsTransactionalAndRetrySafe(t *testing.T) {
 	demands, _ := st.ListDemands(ctx, DemandListOptions{})
 	if len(demands) != 1 || demands[0].Priority != model.DemandPriorityNone || demands[0].Status != model.DemandStatusPending || demands[0].ProjectID != nil {
 		t.Fatalf("new automated demand invariants lost: %+v", demands)
+	}
+}
+
+func TestFeishuIngestionResumePointIsOneTime(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	resume := time.Date(2026, 8, 8, 16, 25, 12, 0, time.UTC)
+	state, err := st.ConfigureFeishuIngestion(ctx, model.FeishuIngestionState{Enabled: true,
+		Timezone: "Asia/Shanghai", ActiveStart: "09:00", ActiveEnd: "23:00",
+		IntervalMinutes: 30, OverlapMinutes: 5}, &resume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.LastSuccessEnd == nil || !state.LastSuccessEnd.Equal(resume) || state.LastBackfillAt == nil {
+		t.Fatalf("resume point was not saved: %+v", state)
+	}
+	if _, err := st.ConfigureFeishuIngestion(ctx, *state, &resume); err == nil {
+		t.Fatal("second resume point should be rejected")
+	}
+	if _, err := st.ConfigureFeishuIngestion(ctx, *state, nil); err != nil {
+		t.Fatalf("ordinary config update should preserve watermark: %v", err)
 	}
 }
 

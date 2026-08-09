@@ -80,6 +80,7 @@ type feishuChatPatch struct {
 	IntervalMinutes *int      `json:"interval_minutes"`
 	OverlapMinutes  *int      `json:"overlap_minutes"`
 	ExcludedChatIDs *[]string `json:"excluded_chat_ids"`
+	ResumeFrom      *string   `json:"resume_from"`
 }
 
 func (s *Server) handlePatchFeishuChat(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +115,16 @@ func (s *Server) handlePatchFeishuChat(w http.ResponseWriter, r *http.Request) {
 	if patch.ExcludedChatIDs != nil {
 		state.ExcludedChatIDs = *patch.ExcludedChatIDs
 	}
-	updated, err := s.store.ConfigureFeishuIngestion(r.Context(), *state)
+	var resumeFrom *time.Time
+	if patch.ResumeFrom != nil {
+		resumeAt, parseErr := time.Parse(time.RFC3339, strings.TrimSpace(*patch.ResumeFrom))
+		if parseErr != nil {
+			writeErr(w, http.StatusBadRequest, errors.New("resume_from must be an RFC3339 timestamp"))
+			return
+		}
+		resumeFrom = &resumeAt
+	}
+	updated, err := s.store.ConfigureFeishuIngestion(r.Context(), *state, resumeFrom)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
