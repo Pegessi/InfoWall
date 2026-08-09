@@ -20,7 +20,7 @@ func (emptyIngestionCollector) Collect(context.Context, time.Time, time.Time, []
 
 type noCallAnalyzer struct{}
 
-func (noCallAnalyzer) Analyze(context.Context, feishuingest.AnalysisInput) (feishuingest.Result, error) {
+func (noCallAnalyzer) Analyze(context.Context, []feishuingest.AnalysisInput) (feishuingest.Result, error) {
 	return feishuingest.Result{}, nil
 }
 

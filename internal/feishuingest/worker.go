@@ -146,14 +146,11 @@ func (w *Worker) runWindow(ctx context.Context, trigger string, start, end time.
 	if w.Enricher != nil {
 		resources = w.Enricher.Enrich(ctx, collection.Messages)
 	}
-	var result Result
-	for _, batch := range buildAnalysisBatches(start, end, collection.Messages, newCandidates, snapshot, resources) {
-		batchResult, analyzeErr := w.Analyzer.Analyze(ctx, batch)
-		if analyzeErr != nil {
-			_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, analyzeErr.Error(), collection.Seen, len(newCandidates))
-			return analyzeErr
-		}
-		mergeAnalysisResult(&result, batchResult)
+	batches := buildAnalysisBatches(start, end, collection.Messages, newCandidates, snapshot, resources)
+	result, err := w.Analyzer.Analyze(ctx, batches)
+	if err != nil {
+		_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, err.Error(), collection.Seen, len(newCandidates))
+		return err
 	}
 	commit.InputTokens = result.InputTokens
 	commit.CachedInputTokens = result.CachedInputTokens
@@ -292,17 +289,6 @@ func boundedContext(messages, candidates []Message, limit int) []Message {
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.Before(result[j].CreatedAt) })
 	return result
-}
-
-func mergeAnalysisResult(destination *Result, source Result) {
-	destination.NewDemands = append(destination.NewDemands, source.NewDemands...)
-	destination.ProgressUpdates = append(destination.ProgressUpdates, source.ProgressUpdates...)
-	destination.Reviews = append(destination.Reviews, source.Reviews...)
-	destination.SkippedMessageIDs = append(destination.SkippedMessageIDs, source.SkippedMessageIDs...)
-	destination.MissingContextIDs = append(destination.MissingContextIDs, source.MissingContextIDs...)
-	destination.InputTokens += source.InputTokens
-	destination.CachedInputTokens += source.CachedInputTokens
-	destination.OutputTokens += source.OutputTokens
 }
 
 func canonicalSource(message Message, excerpt string) model.Source {

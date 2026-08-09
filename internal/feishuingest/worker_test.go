@@ -25,7 +25,7 @@ type fakeAnalyzer struct {
 	err    error
 }
 
-func (analyzer *fakeAnalyzer) Analyze(context.Context, AnalysisInput) (Result, error) {
+func (analyzer *fakeAnalyzer) Analyze(context.Context, []AnalysisInput) (Result, error) {
 	analyzer.calls++
 	return analyzer.result, analyzer.err
 }

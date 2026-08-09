@@ -94,7 +94,7 @@ type Result struct {
 }
 
 type Analyzer interface {
-	Analyze(context.Context, AnalysisInput) (Result, error)
+	Analyze(context.Context, []AnalysisInput) (Result, error)
 }
 
 type Collector interface {
