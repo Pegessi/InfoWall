@@ -47,7 +47,7 @@ func TestV1ToCurrentMigrationPreservesItems(t *testing.T) {
 	if got := userVersion(t, path); got != schemaVersion {
 		t.Fatalf("user_version = %d, want %d", got, schemaVersion)
 	}
-	for _, table := range []string{"demands", "projects", "demand_sources", "demand_progress", "feishu_sync_state", "app_settings"} {
+	for _, table := range []string{"demands", "projects", "demand_sources", "demand_progress", "feishu_sync_state", "app_settings", "feishu_ingestion_state", "feishu_ingestion_runs", "feishu_ingestion_seen", "demand_reviews"} {
 		var count int
 		if err := st.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
 			t.Fatal(err)

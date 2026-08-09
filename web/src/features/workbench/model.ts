@@ -63,6 +63,52 @@ export interface FeishuDocIntegration {
   lastError?: string;
 }
 
+export interface FeishuChatIntegration {
+  enabled: boolean;
+  timezone: string;
+  activeStart: string;
+  activeEnd: string;
+  intervalMinutes: number;
+  overlapMinutes: number;
+  excludedChatIds: string[];
+  lastSuccessEnd?: string;
+  nextRunAt?: string;
+  status: string;
+  lastError?: string;
+}
+
+export interface FeishuIngestionRun {
+  id: string;
+  status: string;
+  trigger: string;
+  windowStart: string;
+  windowEnd: string;
+  messagesSeen: number;
+  messagesCandidate: number;
+  created: number;
+  updated: number;
+  skipped: number;
+  reviewCount: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+}
+
+export interface DemandReview {
+  id: string;
+  status: string;
+  suggestedDemandId?: string;
+  progressText: string;
+  progressDedupeKey: string;
+  source: DemandSource;
+  confidence: number;
+  rationale?: string;
+  createdAt: string;
+}
+
 export interface DemandPatch {
   title?: string;
   summary?: string;

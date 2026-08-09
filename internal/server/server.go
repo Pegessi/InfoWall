@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/infowall/infowall/internal/feed"
+	"github.com/infowall/infowall/internal/feishuingest"
 	"github.com/infowall/infowall/internal/feishusync"
 	"github.com/infowall/infowall/internal/parser"
 	"github.com/infowall/infowall/internal/store"
@@ -34,7 +35,12 @@ type Config struct {
 	DefaultView string // "infowall" or "workbench"; used when the browser URL has no valid hash route
 
 	// LarkRunner is injectable for tests. Production uses lark-cli from PATH.
-	LarkRunner feishusync.CommandRunner
+	LarkRunner         feishusync.CommandRunner
+	IngestionCollector feishuingest.Collector
+	IngestionAnalyzer  feishuingest.Analyzer
+	CodexPath          string
+	CodexCWD           string
+	CodexTimeout       time.Duration
 }
 
 // Server wires together store, hub, and HTTP routes.
@@ -46,6 +52,7 @@ type Server struct {
 
 	feishuClient feishusync.Client
 	syncWorker   *feishusync.Worker
+	ingestWorker *feishuingest.Worker
 	syncCancel   context.CancelFunc
 	syncWG       sync.WaitGroup
 }
@@ -112,6 +119,17 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 	s.feishuClient = feishusync.Client{Runner: runner}
 	s.syncWorker = feishusync.NewWorker(&feishuBackend{store: st}, s.feishuClient)
 	s.syncWorker.OnUpdate = s.broadcastFeishuSyncState
+	collector := cfg.IngestionCollector
+	if collector == nil {
+		collector = feishuingest.LarkCollector{Runner: runner}
+	}
+	analyzer := cfg.IngestionAnalyzer
+	if analyzer == nil {
+		analyzer = feishuingest.CodexAnalyzer{Path: cfg.CodexPath, CWD: cfg.CodexCWD, Timeout: cfg.CodexTimeout}
+	}
+	s.ingestWorker = feishuingest.NewWorker(&ingestionBackend{store: st}, collector, analyzer)
+	s.ingestWorker.Enricher = feishuingest.CommandEnricher{LarkRunner: runner}
+	s.ingestWorker.OnUpdate = s.broadcastFeishuIngestionState
 	workerContext := ctx
 	if workerContext == nil {
 		workerContext = context.Background()
@@ -121,6 +139,11 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 	go func() {
 		defer s.syncWG.Done()
 		s.syncWorker.Run(workerContext)
+	}()
+	s.syncWG.Add(1)
+	go func() {
+		defer s.syncWG.Done()
+		s.ingestWorker.Run(workerContext)
 	}()
 	s.routes()
 	return s, nil
@@ -163,6 +186,13 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/integrations/feishu-doc", api(s.handleSetupFeishuDoc))
 	s.mux.HandleFunc("DELETE /api/integrations/feishu-doc", api(s.handleDisableFeishuDoc))
 	s.mux.HandleFunc("POST /api/integrations/feishu-doc/sync", api(s.handleSyncFeishuDoc))
+	s.mux.HandleFunc("GET /api/integrations/feishu-chat", api(s.handleGetFeishuChat))
+	s.mux.HandleFunc("PATCH /api/integrations/feishu-chat", api(s.handlePatchFeishuChat))
+	s.mux.HandleFunc("POST /api/integrations/feishu-chat/scan", api(s.handleScanFeishuChat))
+	s.mux.HandleFunc("GET /api/integrations/feishu-chat/runs", api(s.handleListFeishuChatRuns))
+	s.mux.HandleFunc("GET /api/demand-reviews", api(s.handleListDemandReviews))
+	s.mux.HandleFunc("POST /api/demand-reviews/{id}/accept", api(s.handleAcceptDemandReview))
+	s.mux.HandleFunc("POST /api/demand-reviews/{id}/dismiss", api(s.handleDismissDemandReview))
 
 	// SSE endpoint: same auth as API (accepts ?key= for EventSource), also logged.
 	s.mux.HandleFunc("GET /events", s.logRequest(s.auth(s.handleEvents)))

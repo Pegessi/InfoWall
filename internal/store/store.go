@@ -26,7 +26,7 @@ type Store struct {
 // introduced report user_version = 0 and are structurally identical to v1, so
 // migrating 0 -> 1 only stamps the version (no data change). Bump this and add a
 // case in migrate() when the schema changes in a future release.
-const schemaVersion = 3
+const schemaVersion = 4
 
 const schema = `
 CREATE TABLE IF NOT EXISTS items (
@@ -128,6 +128,82 @@ CREATE TABLE IF NOT EXISTS app_settings (
 );
 `
 
+const feishuIngestionSchema = `
+ALTER TABLE demand_progress ADD COLUMN dedupe_key TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_demand_progress_dedupe
+    ON demand_progress(dedupe_key) WHERE dedupe_key <> '';
+
+CREATE TABLE IF NOT EXISTS feishu_ingestion_state (
+    id                   INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled              INTEGER NOT NULL DEFAULT 0,
+    timezone             TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+    active_start         TEXT NOT NULL DEFAULT '09:00',
+    active_end           TEXT NOT NULL DEFAULT '23:00',
+    interval_minutes     INTEGER NOT NULL DEFAULT 30,
+    overlap_minutes      INTEGER NOT NULL DEFAULT 5,
+    excluded_chat_ids    TEXT NOT NULL DEFAULT '[]',
+    last_success_end     DATETIME,
+    last_backfill_at     DATETIME,
+    next_run_at          DATETIME,
+    status               TEXT NOT NULL DEFAULT 'disabled',
+    last_error           TEXT NOT NULL DEFAULT '',
+    current_run_id       TEXT NOT NULL DEFAULT '',
+    lease_until          DATETIME,
+    requested            INTEGER NOT NULL DEFAULT 0,
+    updated_at           DATETIME NOT NULL
+);
+INSERT OR IGNORE INTO feishu_ingestion_state (id, updated_at) VALUES (1, CURRENT_TIMESTAMP);
+
+CREATE TABLE IF NOT EXISTS feishu_ingestion_runs (
+    id                    TEXT PRIMARY KEY,
+    trigger               TEXT NOT NULL,
+    status                TEXT NOT NULL,
+    window_start          DATETIME NOT NULL,
+    window_end            DATETIME NOT NULL,
+    messages_seen         INTEGER NOT NULL DEFAULT 0,
+    messages_candidate    INTEGER NOT NULL DEFAULT 0,
+    created               INTEGER NOT NULL DEFAULT 0,
+    updated               INTEGER NOT NULL DEFAULT 0,
+    skipped               INTEGER NOT NULL DEFAULT 0,
+    review_count          INTEGER NOT NULL DEFAULT 0,
+    missing_context_count INTEGER NOT NULL DEFAULT 0,
+    input_tokens          INTEGER NOT NULL DEFAULT 0,
+    cached_input_tokens   INTEGER NOT NULL DEFAULT 0,
+    output_tokens         INTEGER NOT NULL DEFAULT 0,
+    started_at            DATETIME NOT NULL,
+    finished_at           DATETIME,
+    error                 TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_feishu_ingestion_runs_started
+    ON feishu_ingestion_runs(started_at DESC);
+
+CREATE TABLE IF NOT EXISTS feishu_ingestion_seen (
+    message_id TEXT PRIMARY KEY,
+    seen_at    DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feishu_ingestion_seen_at
+    ON feishu_ingestion_seen(seen_at DESC);
+
+CREATE TABLE IF NOT EXISTS demand_reviews (
+    id                  TEXT PRIMARY KEY,
+    kind                TEXT NOT NULL DEFAULT 'progress',
+    status              TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'dismissed')),
+    suggested_demand_id TEXT REFERENCES demands(id) ON DELETE SET NULL,
+    progress_text       TEXT NOT NULL,
+    source_json         TEXT NOT NULL,
+    progress_dedupe_key TEXT NOT NULL DEFAULT '',
+    confidence          REAL NOT NULL DEFAULT 0,
+    rationale           TEXT NOT NULL DEFAULT '',
+    created_at          DATETIME NOT NULL,
+    updated_at          DATETIME NOT NULL,
+    resolved_at         DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_demand_reviews_status_created
+    ON demand_reviews(status, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_demand_reviews_progress_dedupe
+    ON demand_reviews(progress_dedupe_key) WHERE progress_dedupe_key <> '';
+`
+
 // SQLite time formats we accept when scanning. modernc.org/sqlite serializes
 // time.Time as RFC3339Nano by default, but we also accept the Go stdlib
 // "2006-01-02 15:04:05" form in case rows were inserted by other tooling.
@@ -223,6 +299,13 @@ func migrateStep(db *sql.DB, from int) error {
 		// table is independent of feed and workbench data.
 		if _, err := db.Exec(appSettingsSchema); err != nil {
 			return fmt.Errorf("apply app settings schema: %w", err)
+		}
+		return nil
+	case 3:
+		// 3 -> 4: add automated Feishu chat ingestion state, run audit,
+		// ambiguous-progress review items, and retry-safe progress keys.
+		if _, err := db.Exec(feishuIngestionSchema); err != nil {
+			return fmt.Errorf("apply Feishu ingestion schema: %w", err)
 		}
 		return nil
 	default:

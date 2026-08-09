@@ -17,13 +17,15 @@ const (
 	demandsPath           = "/api/demands"
 	projectsPath          = "/api/projects"
 	feishuIntegrationPath = "/api/integrations/feishu-doc"
+	feishuChatPath        = "/api/integrations/feishu-chat"
+	demandReviewsPath     = "/api/demand-reviews"
 )
 
 // --- demand ---
 
 func cmdDemand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: infowall demand <apply|create|import|list|get|update|progress|dismiss|restore> [flags]")
+		return errors.New("usage: infowall demand <apply|create|import|list|get|update|progress|dismiss|restore|review> [flags]")
 	}
 
 	switch args[0] {
@@ -45,6 +47,8 @@ func cmdDemand(args []string) error {
 		return cmdDemandSetStatus("dismiss", "dismissed", args[1:])
 	case "restore":
 		return cmdDemandSetStatus("restore", "pending", args[1:])
+	case "review":
+		return cmdDemandReview(args[1:])
 	case "help", "-h", "--help":
 		printDemandUsage()
 		return nil
@@ -67,6 +71,9 @@ Usage:
   infowall demand progress ID --text TEXT [--source JSON|--source-input FILE|-] [client flags]
   infowall demand dismiss ID [client flags]
   infowall demand restore ID [client flags]
+  infowall demand review list [--status pending|accepted|dismissed|all] [client flags]
+  infowall demand review accept REVIEW_ID [--demand DEMAND_ID] [client flags]
+  infowall demand review dismiss REVIEW_ID [client flags]
 
 Client flags: --server URL --api-key KEY --json`)
 }
@@ -308,6 +315,45 @@ func demandPath(id string) string {
 	return demandsPath + "/" + url.PathEscape(strings.TrimSpace(id))
 }
 
+func cmdDemandReview(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: infowall demand review <list|accept|dismiss> [flags]")
+	}
+	switch args[0] {
+	case "list":
+		fs := flag.NewFlagSet("demand review list", flag.ExitOnError)
+		status := fs.String("status", "pending", "pending, accepted, dismissed, or all")
+		cfg := addClientFlags(fs)
+		parseFlags(fs, args[1:])
+		if fs.NArg() != 0 {
+			return cfg.fail(errors.New("usage: infowall demand review list [--status STATUS] [client flags]"))
+		}
+		query := url.Values{"status": []string{strings.ToLower(strings.TrimSpace(*status))}}
+		return requestAndPrint(cfg, http.MethodGet, demandReviewsPath+"?"+query.Encode(), nil)
+	case "accept":
+		fs := flag.NewFlagSet("demand review accept", flag.ExitOnError)
+		demandID := fs.String("demand", "", "override the suggested demand id")
+		cfg := addClientFlags(fs)
+		parseFlags(fs, args[1:])
+		if fs.NArg() != 1 {
+			return cfg.fail(errors.New("usage: infowall demand review accept REVIEW_ID [--demand DEMAND_ID] [client flags]"))
+		}
+		payload := map[string]any{}
+		putNonEmpty(payload, "demand_id", *demandID)
+		return requestAndPrint(cfg, http.MethodPost, demandReviewsPath+"/"+url.PathEscape(fs.Arg(0))+"/accept", payload)
+	case "dismiss":
+		fs := flag.NewFlagSet("demand review dismiss", flag.ExitOnError)
+		cfg := addClientFlags(fs)
+		parseFlags(fs, args[1:])
+		if fs.NArg() != 1 {
+			return cfg.fail(errors.New("usage: infowall demand review dismiss REVIEW_ID [client flags]"))
+		}
+		return requestAndPrint(cfg, http.MethodPost, demandReviewsPath+"/"+url.PathEscape(fs.Arg(0))+"/dismiss", nil)
+	default:
+		return fmt.Errorf("unknown demand review subcommand %q", args[0])
+	}
+}
+
 // --- project ---
 
 func cmdProject(args []string) error {
@@ -488,6 +534,104 @@ func cmdSyncFeishuSimple(command, method, path string, args []string) error {
 		return cfg.fail(fmt.Errorf("usage: infowall sync feishu %s [client flags]", command))
 	}
 	return requestAndPrint(cfg, method, path, nil)
+}
+
+// --- scan feishu ---
+
+func cmdScan(args []string) error {
+	if len(args) < 2 || args[0] != "feishu" {
+		return errors.New("usage: infowall scan feishu <setup|status|now|runs|disable> [flags]")
+	}
+	switch args[1] {
+	case "setup":
+		return cmdScanFeishuSetup(args[2:])
+	case "status":
+		return cmdScanFeishuSimple("status", http.MethodGet, feishuChatPath, args[2:])
+	case "now":
+		return cmdScanFeishuSimple("now", http.MethodPost, feishuChatPath+"/scan", args[2:])
+	case "runs":
+		return cmdScanFeishuRuns(args[2:])
+	case "disable":
+		return cmdScanFeishuDisable(args[2:])
+	case "help", "-h", "--help":
+		printScanFeishuUsage()
+		return nil
+	default:
+		return fmt.Errorf("unknown scan feishu subcommand %q", args[1])
+	}
+}
+
+func printScanFeishuUsage() {
+	fmt.Println(`infowall scan feishu — incrementally collect demand evidence from visible chats
+
+Usage:
+  infowall scan feishu setup [--exclude-chat CHAT_ID ...] [client flags]
+  infowall scan feishu status [client flags]
+  infowall scan feishu now [client flags]
+  infowall scan feishu runs [--limit N] [client flags]
+  infowall scan feishu disable [client flags]
+
+The default schedule is Asia/Shanghai 09:00–23:00 every 30 minutes with a 5-minute overlap.
+Client flags: --server URL --api-key KEY --json`)
+}
+
+type repeatedString []string
+
+func (values *repeatedString) String() string { return strings.Join(*values, ",") }
+func (values *repeatedString) Set(value string) error {
+	*values = append(*values, strings.TrimSpace(value))
+	return nil
+}
+
+func cmdScanFeishuSetup(args []string) error {
+	fs := flag.NewFlagSet("scan feishu setup", flag.ExitOnError)
+	timezone := fs.String("timezone", "Asia/Shanghai", "IANA timezone")
+	start := fs.String("start", "09:00", "daily active start HH:MM")
+	end := fs.String("end", "23:00", "daily active end HH:MM")
+	interval := fs.Int("interval", 30, "scan interval in minutes")
+	overlap := fs.Int("overlap", 5, "watermark overlap in minutes")
+	var exclusions repeatedString
+	fs.Var(&exclusions, "exclude-chat", "chat id to exclude; repeat for multiple chats")
+	cfg := addClientFlags(fs)
+	parseFlags(fs, args)
+	if fs.NArg() != 0 {
+		return cfg.fail(errors.New("usage: infowall scan feishu setup [flags]"))
+	}
+	payload := map[string]any{"enabled": true, "timezone": *timezone, "active_start": *start,
+		"active_end": *end, "interval_minutes": *interval, "overlap_minutes": *overlap,
+		"excluded_chat_ids": []string(exclusions)}
+	return requestAndPrint(cfg, http.MethodPatch, feishuChatPath, payload)
+}
+
+func cmdScanFeishuSimple(command, method, path string, args []string) error {
+	fs := flag.NewFlagSet("scan feishu "+command, flag.ExitOnError)
+	cfg := addClientFlags(fs)
+	parseFlags(fs, args)
+	if fs.NArg() != 0 {
+		return cfg.fail(fmt.Errorf("usage: infowall scan feishu %s [client flags]", command))
+	}
+	return requestAndPrint(cfg, method, path, nil)
+}
+
+func cmdScanFeishuRuns(args []string) error {
+	fs := flag.NewFlagSet("scan feishu runs", flag.ExitOnError)
+	limit := fs.Int("limit", 20, "maximum runs to return")
+	cfg := addClientFlags(fs)
+	parseFlags(fs, args)
+	if fs.NArg() != 0 {
+		return cfg.fail(errors.New("usage: infowall scan feishu runs [--limit N] [client flags]"))
+	}
+	return requestAndPrint(cfg, http.MethodGet, feishuChatPath+"/runs?limit="+url.QueryEscape(fmt.Sprint(*limit)), nil)
+}
+
+func cmdScanFeishuDisable(args []string) error {
+	fs := flag.NewFlagSet("scan feishu disable", flag.ExitOnError)
+	cfg := addClientFlags(fs)
+	parseFlags(fs, args)
+	if fs.NArg() != 0 {
+		return cfg.fail(errors.New("usage: infowall scan feishu disable [client flags]"))
+	}
+	return requestAndPrint(cfg, http.MethodPatch, feishuChatPath, map[string]any{"enabled": false})
 }
 
 // --- shared workbench client helpers ---

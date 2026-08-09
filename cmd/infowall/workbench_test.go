@@ -63,6 +63,49 @@ func TestDemandCreateCLIRequest(t *testing.T) {
 	}
 }
 
+func TestScanFeishuSetupAndReviewAcceptCLI(t *testing.T) {
+	requests := make([]struct {
+		method string
+		path   string
+		body   map[string]any
+	}, 0, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if r.Body != nil && r.ContentLength != 0 {
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+		}
+		requests = append(requests, struct {
+			method string
+			path   string
+			body   map[string]any
+		}{r.Method, r.URL.Path, body})
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+	if _, stderr, err := captureCommandOutput(t, func() error {
+		return run([]string{"scan", "feishu", "setup", "--exclude-chat", "oc_skip", "--server", srv.URL, "--json"})
+	}); err != nil {
+		t.Fatalf("scan setup failed: %v stderr=%s", err, stderr)
+	}
+	if _, stderr, err := captureCommandOutput(t, func() error {
+		return run([]string{"demand", "review", "accept", "review-1", "--demand", "demand-1", "--server", srv.URL, "--json"})
+	}); err != nil {
+		t.Fatalf("review accept failed: %v stderr=%s", err, stderr)
+	}
+	if len(requests) != 2 || requests[0].method != http.MethodPatch || requests[0].path != "/api/integrations/feishu-chat" {
+		t.Fatalf("unexpected setup request: %+v", requests)
+	}
+	if requests[0].body["enabled"] != true || requests[0].body["interval_minutes"] != float64(30) {
+		t.Fatalf("unexpected setup body: %+v", requests[0].body)
+	}
+	if requests[1].path != "/api/demand-reviews/review-1/accept" || requests[1].body["demand_id"] != "demand-1" {
+		t.Fatalf("unexpected review request: %+v", requests[1])
+	}
+}
+
 func TestDemandImportCLINormalizesBareArray(t *testing.T) {
 	input := filepath.Join(t.TempDir(), "demands.json")
 	raw := `[{"title":"跟进发布","status":"pending","sources":[{"kind":"feishu-im","external_id":"om_1","dedupe_key":"feishu-im:om_1:follow-release"}]}]`

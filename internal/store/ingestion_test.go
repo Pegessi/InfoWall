@@ -1,0 +1,128 @@
+package store
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/infowall/infowall/internal/model"
+)
+
+func enableIngestion(t *testing.T, st *Store) model.FeishuIngestionState {
+	t.Helper()
+	state, err := st.ConfigureFeishuIngestion(context.Background(), model.FeishuIngestionState{
+		Enabled: true, Timezone: "Asia/Shanghai", ActiveStart: "09:00", ActiveEnd: "23:00",
+		IntervalMinutes: 30, OverlapMinutes: 5, ExcludedChatIDs: []string{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return *state
+}
+
+func TestFeishuIngestionCommitIsTransactionalAndRetrySafe(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	enableIngestion(t, st)
+	end := time.Now().UTC().Truncate(time.Second)
+	run, err := st.StartFeishuIngestionRun(ctx, "manual", end.Add(-time.Hour), end, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	demand := &model.Demand{Title: "修复 prefill only 首次分配失败后的安全重试",
+		Description: "首次 prefill 分配失败需要在可见输出前安全重放。", NextAction: "补齐失败注入测试",
+		ProjectHint: "Server", Sources: []model.Source{{Kind: "feishu-im", ExternalID: "om_1",
+			DedupeKey: "feishu-im:om_1:0", Excerpt: "prefill only 任务需要重试", MessageTime: end}}}
+	completed, err := st.CompleteFeishuIngestion(ctx, model.FeishuIngestionCommit{RunID: run.ID,
+		WindowEnd: end, MessagesSeen: 1, MessagesCandidate: 1,
+		ProcessedMessageIDs: []string{"om_1"}, NewDemands: []*model.Demand{demand}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Created != 1 || completed.Status != "success" {
+		t.Fatalf("unexpected completed run: %+v", completed)
+	}
+	state, _ := st.GetFeishuIngestionState(ctx)
+	if state.LastSuccessEnd == nil || !state.LastSuccessEnd.Equal(end) {
+		t.Fatalf("watermark was not committed: %+v", state)
+	}
+	newIDs, err := st.FilterNewFeishuMessageIDs(ctx, []string{"om_1", "om_2"})
+	if err != nil || newIDs["om_1"] || !newIDs["om_2"] {
+		t.Fatalf("seen-message filter = %+v err=%v", newIDs, err)
+	}
+	run2, err := st.StartFeishuIngestionRun(ctx, "manual", end.Add(-time.Hour), end, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err = st.CompleteFeishuIngestion(ctx, model.FeishuIngestionCommit{RunID: run2.ID,
+		WindowEnd: end, MessagesSeen: 1, ProcessedMessageIDs: []string{"om_1"}, NewDemands: []*model.Demand{demand}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Created != 0 || completed.Skipped != 1 {
+		t.Fatalf("repeat created duplicate: %+v", completed)
+	}
+	demands, _ := st.ListDemands(ctx, DemandListOptions{})
+	if len(demands) != 1 || demands[0].Priority != model.DemandPriorityNone || demands[0].Status != model.DemandStatusPending || demands[0].ProjectID != nil {
+		t.Fatalf("new automated demand invariants lost: %+v", demands)
+	}
+}
+
+func TestFeishuIngestionFailureDoesNotAdvanceWatermark(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	enableIngestion(t, st)
+	end := time.Now().UTC()
+	run, err := st.StartFeishuIngestionRun(ctx, "manual", end.Add(-time.Hour), end, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.CompleteFeishuIngestion(ctx, model.FeishuIngestionCommit{RunID: run.ID,
+		WindowEnd: end, NewDemands: []*model.Demand{{Title: "", Sources: []model.Source{{Kind: "feishu-im", DedupeKey: "feishu-im:bad:0"}}}}})
+	if err == nil {
+		t.Fatal("expected invalid demand to abort transaction")
+	}
+	state, _ := st.GetFeishuIngestionState(ctx)
+	if state.LastSuccessEnd != nil {
+		t.Fatalf("failed transaction advanced watermark: %+v", state)
+	}
+	demands, _ := st.ListDemands(ctx, DemandListOptions{})
+	if len(demands) != 0 {
+		t.Fatalf("failed transaction left demands: %+v", demands)
+	}
+}
+
+func TestAutomaticProgressConfidenceGateAndReviewResolution(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	enableIngestion(t, st)
+	demand, err := st.CreateDemand(ctx, &model.Demand{Title: "Arnold 部署服务动态热更新", Sources: []model.Source{{Kind: "manual", DedupeKey: "manual:hot-update"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := time.Now().UTC()
+	run, _ := st.StartFeishuIngestionRun(ctx, "manual", end.Add(-time.Hour), end, time.Minute)
+	update := model.DemandProgressUpdate{DemandID: demand.ID, Text: "已完成首轮灰度", DedupeKey: "feishu-progress:om_2:" + demand.ID,
+		Source:     model.Source{Kind: "feishu-im", ExternalID: "om_2", DedupeKey: "feishu-im:om_2:0", Excerpt: "首轮灰度完成"},
+		Confidence: 0.7, Anchors: []string{"Arnold"}}
+	completed, err := st.CompleteFeishuIngestion(ctx, model.FeishuIngestionCommit{RunID: run.ID, WindowEnd: end,
+		MessagesCandidate: 1, ProcessedMessageIDs: []string{"om_2"}, ProgressUpdates: []model.DemandProgressUpdate{update}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.ReviewCount != 1 || completed.Updated != 0 {
+		t.Fatalf("low-confidence update bypassed review: %+v", completed)
+	}
+	reviews, err := st.ListDemandReviews(ctx, "pending")
+	if err != nil || len(reviews) != 1 {
+		t.Fatalf("reviews=%+v err=%v", reviews, err)
+	}
+	resolved, err := st.ResolveDemandReview(ctx, reviews[0].ID, "accept", demand.ID)
+	if err != nil || resolved.Status != "accepted" {
+		t.Fatalf("resolve=%+v err=%v", resolved, err)
+	}
+	updatedDemand, _ := st.GetDemand(ctx, demand.ID)
+	if len(updatedDemand.Progress) != 1 || updatedDemand.Progress[0].DedupeKey != update.DedupeKey || len(updatedDemand.Sources) != 2 {
+		t.Fatalf("review evidence/progress was not atomically appended: %+v", updatedDemand)
+	}
+}

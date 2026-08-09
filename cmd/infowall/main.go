@@ -94,6 +94,8 @@ func run(args []string) error {
 		return cmdProject(rest)
 	case "sync":
 		return cmdSync(rest)
+	case "scan":
+		return cmdScan(rest)
 	case "agent":
 		return cmdAgent(rest)
 	case "version", "--version", "-v":
@@ -124,9 +126,10 @@ Usage:
   infowall doctor  [--server URL] [--api-key KEY] [--json]
   infowall db info   [--db infowall.db] [--json]
   infowall db backup --out PATH [--db infowall.db] [--json]
-  infowall demand <apply|create|import|list|get|update|progress|dismiss|restore> [flags]
+  infowall demand <apply|create|import|list|get|update|progress|dismiss|restore|review> [flags]
   infowall project <create|list|update|archive> [flags]
   infowall sync feishu <setup|status|now|disable> [flags]
+  infowall scan feishu <setup|status|now|runs|disable> [flags]
   infowall agent spec [--json]
   infowall version
 

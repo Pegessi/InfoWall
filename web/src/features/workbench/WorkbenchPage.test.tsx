@@ -2,8 +2,8 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Demand, Project } from "./model";
-import { DemandCard, PendingCard, ProjectCard } from "./WorkbenchPage";
+import type { Demand, DemandReview, Project } from "./model";
+import { DemandCard, PendingCard, ProjectCard, ReviewCard } from "./WorkbenchPage";
 
 const project: Project = {
   id: "project-xperf",
@@ -133,6 +133,30 @@ describe("DemandCard", () => {
     fireEvent.click(screen.getByRole("button", { name: "设置优先级 P3" }));
     expect(onUpdate).toHaveBeenCalledWith({ priority: "p3" });
     expect(onOpen).not.toHaveBeenCalled();
+  });
+});
+
+describe("ReviewCard", () => {
+  it("shows ambiguous progress evidence and requires a target before acceptance", () => {
+    const review: DemandReview = {
+      id: "review-1", status: "pending", suggestedDemandId: demand.id,
+      progressText: "已完成首轮灰度，等待扩大实例范围。",
+      progressDedupeKey: `feishu-progress:om_review:${demand.id}`,
+      confidence: 0.72, rationale: "组件相同，但聊天同时提到两个部署需求。",
+      createdAt: "2026-08-09T10:00:00+08:00",
+      source: { kind: "feishu-im", label: "已完成首轮灰度", excerpt: "已完成首轮灰度", senderName: "需求提出人" },
+    };
+    const onAccept = vi.fn();
+    const onDismiss = vi.fn();
+    render(<ReviewCard review={review} demands={[demand]} disabled={false} onAccept={onAccept} onDismiss={onDismiss} />);
+
+    expect(screen.getByText(`追加到：${demand.title}`)).toBeTruthy();
+    expect(screen.getByText("已完成首轮灰度，等待扩大实例范围。")).toBeTruthy();
+    expect(screen.getByLabelText("关联需求")).toHaveProperty("value", demand.id);
+    fireEvent.click(screen.getByRole("button", { name: "确认追加" }));
+    expect(onAccept).toHaveBeenCalledWith(review.id, demand.id);
+    fireEvent.click(screen.getByRole("button", { name: "忽略" }));
+    expect(onDismiss).toHaveBeenCalledWith(review.id);
   });
 });
 

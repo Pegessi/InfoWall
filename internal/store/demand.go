@@ -217,7 +217,7 @@ func loadDemandRelations(ctx context.Context, q demandQueryer, demand *model.Dem
 		return err
 	}
 
-	rows, err = q.QueryContext(ctx, `SELECT id, demand_id, text, created_at
+	rows, err = q.QueryContext(ctx, `SELECT id, demand_id, text, dedupe_key, created_at
 		FROM demand_progress WHERE demand_id = ? ORDER BY created_at, id`, demand.ID)
 	if err != nil {
 		return err
@@ -226,7 +226,8 @@ func loadDemandRelations(ctx context.Context, q demandQueryer, demand *model.Dem
 	for rows.Next() {
 		var progress model.Progress
 		var createdRaw any
-		if err := rows.Scan(&progress.ID, &progress.DemandID, &progress.Text, &createdRaw); err != nil {
+		if err := rows.Scan(&progress.ID, &progress.DemandID, &progress.Text,
+			&progress.DedupeKey, &createdRaw); err != nil {
 			return err
 		}
 		progress.CreatedAt = parseSQLiteTime(createdRaw)
@@ -336,8 +337,9 @@ func (s *Store) AddDemandProgressWithSource(ctx context.Context, demandID, text 
 		}
 		return nil, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO demand_progress (id, demand_id, text, created_at)
-		VALUES (?, ?, ?, ?)`, progress.ID, progress.DemandID, progress.Text, progress.CreatedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO demand_progress (id, demand_id, text, dedupe_key, created_at)
+		VALUES (?, ?, ?, ?, ?)`, progress.ID, progress.DemandID, progress.Text,
+		progress.DedupeKey, progress.CreatedAt); err != nil {
 		return nil, err
 	}
 	if source != nil {
@@ -506,8 +508,9 @@ func insertDemandTx(ctx context.Context, tx *sql.Tx, demand *model.Demand) error
 		if progress.CreatedAt.IsZero() {
 			progress.CreatedAt = demand.CreatedAt
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO demand_progress (id, demand_id, text, created_at)
-			VALUES (?, ?, ?, ?)`, progress.ID, demand.ID, progress.Text, progress.CreatedAt.UTC()); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO demand_progress (id, demand_id, text, dedupe_key, created_at)
+			VALUES (?, ?, ?, ?, ?)`, progress.ID, demand.ID, progress.Text,
+			strings.TrimSpace(progress.DedupeKey), progress.CreatedAt.UTC()); err != nil {
 			return fmt.Errorf("insert demand progress: %w", err)
 		}
 	}
@@ -607,6 +610,10 @@ func mergeImportedProgressTx(ctx context.Context, tx *sql.Tx, demandID string, e
 		}
 		duplicate := false
 		for _, current := range existing {
+			if progress.DedupeKey != "" && progress.DedupeKey == current.DedupeKey {
+				duplicate = true
+				break
+			}
 			if progress.ID != "" && progress.ID == current.ID {
 				duplicate = true
 				break
@@ -626,8 +633,9 @@ func mergeImportedProgressTx(ctx context.Context, tx *sql.Tx, demandID string, e
 		if progress.CreatedAt.IsZero() {
 			progress.CreatedAt = time.Now().UTC()
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO demand_progress (id, demand_id, text, created_at)
-			VALUES (?, ?, ?, ?)`, progress.ID, demandID, progress.Text, progress.CreatedAt.UTC()); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO demand_progress (id, demand_id, text, dedupe_key, created_at)
+			VALUES (?, ?, ?, ?, ?)`, progress.ID, demandID, progress.Text,
+			strings.TrimSpace(progress.DedupeKey), progress.CreatedAt.UTC()); err != nil {
 			if isUniqueConstraint(err) {
 				continue
 			}

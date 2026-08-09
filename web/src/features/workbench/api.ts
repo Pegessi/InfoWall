@@ -6,6 +6,9 @@ import type {
   DemandSource,
   DemandStatus,
   FeishuDocIntegration,
+  FeishuChatIntegration,
+  FeishuIngestionRun,
+  DemandReview,
   Project,
 } from "./model";
 
@@ -214,6 +217,63 @@ export async function fetchFeishuIntegration(): Promise<FeishuDocIntegration> {
 
 export async function syncFeishuIntegration(): Promise<void> {
   await request<unknown>("/api/integrations/feishu-doc/sync", { method: "POST" });
+}
+
+export async function fetchFeishuChatIntegration(): Promise<FeishuChatIntegration> {
+  const raw = await request<JsonRecord>("/api/integrations/feishu-chat");
+  return {
+    enabled: Boolean(raw.enabled),
+    timezone: String(raw.timezone ?? "Asia/Shanghai"),
+    activeStart: String(raw.active_start ?? "09:00"),
+    activeEnd: String(raw.active_end ?? "23:00"),
+    intervalMinutes: Number(raw.interval_minutes ?? 30),
+    overlapMinutes: Number(raw.overlap_minutes ?? 5),
+    excludedChatIds: Array.isArray(raw.excluded_chat_ids) ? raw.excluded_chat_ids.map(String) : [],
+    lastSuccessEnd: meaningfulTimestamp(stringValue(raw, "lastSuccessEnd", "last_success_end")),
+    nextRunAt: meaningfulTimestamp(stringValue(raw, "nextRunAt", "next_run_at")),
+    status: String(raw.status ?? "disabled"),
+    lastError: stringValue(raw, "lastError", "last_error"),
+  };
+}
+
+export async function fetchFeishuIngestionRuns(): Promise<FeishuIngestionRun[]> {
+  const raw = await request<{ runs?: JsonRecord[] }>("/api/integrations/feishu-chat/runs?limit=5");
+  return (raw.runs ?? []).map((row) => ({
+    id: String(row.id ?? ""), status: String(row.status ?? ""), trigger: String(row.trigger ?? ""),
+    windowStart: String(row.window_start ?? ""), windowEnd: String(row.window_end ?? ""),
+    messagesSeen: Number(row.messages_seen ?? 0), messagesCandidate: Number(row.messages_candidate ?? 0),
+    created: Number(row.created ?? 0), updated: Number(row.updated ?? 0), skipped: Number(row.skipped ?? 0),
+    reviewCount: Number(row.review_count ?? 0), inputTokens: Number(row.input_tokens ?? 0),
+    cachedInputTokens: Number(row.cached_input_tokens ?? 0), outputTokens: Number(row.output_tokens ?? 0),
+    startedAt: String(row.started_at ?? ""), finishedAt: meaningfulTimestamp(stringValue(row, "finishedAt", "finished_at")),
+    error: stringValue(row, "error"),
+  }));
+}
+
+export async function scanFeishuNow(): Promise<void> {
+  await request<unknown>("/api/integrations/feishu-chat/scan", { method: "POST" });
+}
+
+export async function fetchDemandReviews(): Promise<DemandReview[]> {
+  const raw = await request<{ reviews?: JsonRecord[] }>("/api/demand-reviews?status=pending");
+  return (raw.reviews ?? []).map((row) => ({
+    id: String(row.id ?? ""), status: String(row.status ?? "pending"),
+    suggestedDemandId: stringValue(row, "suggestedDemandId", "suggested_demand_id"),
+    progressText: String(row.progress_text ?? ""), progressDedupeKey: String(row.progress_dedupe_key ?? ""),
+    source: normalizeSources([row.source])[0] ?? { kind: "feishu-im", label: "来源记录" },
+    confidence: Number(row.confidence ?? 0), rationale: stringValue(row, "rationale"),
+    createdAt: String(row.created_at ?? ""),
+  }));
+}
+
+export async function acceptDemandReview(id: string, demandId?: string): Promise<void> {
+  await request<unknown>(`/api/demand-reviews/${encodeURIComponent(id)}/accept`, {
+    method: "POST", body: JSON.stringify(demandId ? { demand_id: demandId } : {}),
+  });
+}
+
+export async function dismissDemandReview(id: string): Promise<void> {
+  await request<unknown>(`/api/demand-reviews/${encodeURIComponent(id)}/dismiss`, { method: "POST" });
 }
 
 export function createWorkbenchEventSource(): EventSource {

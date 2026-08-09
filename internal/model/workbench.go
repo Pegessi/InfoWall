@@ -63,6 +63,7 @@ type Progress struct {
 	ID        string    `json:"id"`
 	DemandID  string    `json:"demand_id,omitempty"`
 	Text      string    `json:"text"`
+	DedupeKey string    `json:"dedupe_key,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -119,4 +120,87 @@ type FeishuSyncState struct {
 	RetryCount     int        `json:"retry_count"`
 	NextRetryAt    *time.Time `json:"next_retry_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+type FeishuIngestionState struct {
+	Enabled         bool       `json:"enabled"`
+	Timezone        string     `json:"timezone"`
+	ActiveStart     string     `json:"active_start"`
+	ActiveEnd       string     `json:"active_end"`
+	IntervalMinutes int        `json:"interval_minutes"`
+	OverlapMinutes  int        `json:"overlap_minutes"`
+	ExcludedChatIDs []string   `json:"excluded_chat_ids"`
+	LastSuccessEnd  *time.Time `json:"last_success_end"`
+	LastBackfillAt  *time.Time `json:"last_backfill_at"`
+	NextRunAt       *time.Time `json:"next_run_at"`
+	Status          string     `json:"status"`
+	LastError       string     `json:"last_error,omitempty"`
+	CurrentRunID    string     `json:"current_run_id,omitempty"`
+	LeaseUntil      *time.Time `json:"lease_until"`
+	Requested       bool       `json:"requested"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+type FeishuIngestionRun struct {
+	ID                  string     `json:"id"`
+	Trigger             string     `json:"trigger"`
+	Status              string     `json:"status"`
+	WindowStart         time.Time  `json:"window_start"`
+	WindowEnd           time.Time  `json:"window_end"`
+	MessagesSeen        int        `json:"messages_seen"`
+	MessagesCandidate   int        `json:"messages_candidate"`
+	Created             int        `json:"created"`
+	Updated             int        `json:"updated"`
+	Skipped             int        `json:"skipped"`
+	ReviewCount         int        `json:"review_count"`
+	MissingContextCount int        `json:"missing_context_count"`
+	InputTokens         int64      `json:"input_tokens"`
+	CachedInputTokens   int64      `json:"cached_input_tokens"`
+	OutputTokens        int64      `json:"output_tokens"`
+	StartedAt           time.Time  `json:"started_at"`
+	FinishedAt          *time.Time `json:"finished_at"`
+	Error               string     `json:"error,omitempty"`
+}
+
+type DemandReview struct {
+	ID                string     `json:"id"`
+	Kind              string     `json:"kind"`
+	Status            string     `json:"status"`
+	SuggestedDemandID string     `json:"suggested_demand_id,omitempty"`
+	ProgressText      string     `json:"progress_text"`
+	Source            Source     `json:"source"`
+	ProgressDedupeKey string     `json:"progress_dedupe_key"`
+	Confidence        float64    `json:"confidence"`
+	Rationale         string     `json:"rationale,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	ResolvedAt        *time.Time `json:"resolved_at"`
+}
+
+// DemandProgressUpdate is an ingestion-only append. Automated collection must
+// never rewrite the matched demand's user-managed fields.
+type DemandProgressUpdate struct {
+	DemandID   string   `json:"demand_id"`
+	Text       string   `json:"text"`
+	DedupeKey  string   `json:"dedupe_key"`
+	Source     Source   `json:"source"`
+	Confidence float64  `json:"confidence"`
+	Anchors    []string `json:"anchors,omitempty"`
+}
+
+type FeishuIngestionCommit struct {
+	RunID               string                 `json:"run_id"`
+	WindowEnd           time.Time              `json:"window_end"`
+	BackfillAt          *time.Time             `json:"backfill_at,omitempty"`
+	MessagesSeen        int                    `json:"messages_seen"`
+	MessagesCandidate   int                    `json:"messages_candidate"`
+	NewDemands          []*Demand              `json:"new_demands"`
+	ProgressUpdates     []DemandProgressUpdate `json:"progress_updates"`
+	Reviews             []DemandReview         `json:"reviews"`
+	ProcessedMessageIDs []string               `json:"processed_message_ids"`
+	Skipped             int                    `json:"skipped"`
+	MissingContextCount int                    `json:"missing_context_count"`
+	InputTokens         int64                  `json:"input_tokens"`
+	CachedInputTokens   int64                  `json:"cached_input_tokens"`
+	OutputTokens        int64                  `json:"output_tokens"`
 }

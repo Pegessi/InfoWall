@@ -27,7 +27,10 @@ import type {
   DemandPriority,
   DemandSource,
   DemandStatus,
+  DemandReview,
+  FeishuChatIntegration,
   FeishuDocIntegration,
+  FeishuIngestionRun,
   Project,
   WorkbenchSection,
 } from "./model";
@@ -206,6 +209,44 @@ function SyncBar({ integration, busy, onSync }: { integration: FeishuDocIntegrat
       </div>
       <button type="button" disabled={syncing || !configured} onClick={onSync} className="inline-flex h-10 w-full shrink-0 items-center justify-center gap-1.5 rounded-md border border-[hsl(var(--border))] px-3 text-xs font-medium hover:bg-[hsl(var(--muted))] disabled:opacity-50 sm:h-8 sm:w-auto">
         <RefreshCw className={`h-3.5 w-3.5 ${syncing ? "animate-spin" : ""}`} />{!configured ? "尚未配置" : failed ? "重试同步" : "立即同步"}
+      </button>
+    </div>
+  );
+}
+
+function IngestionBar({ integration, latestRun, busy, onScan }: {
+  integration: FeishuChatIntegration | null;
+  latestRun?: FeishuIngestionRun;
+  busy: boolean;
+  onScan: () => void;
+}) {
+  const running = integration?.status === "running" || integration?.status === "pending";
+  const failed = integration?.status === "error";
+  const enabled = Boolean(integration?.enabled);
+  const status = !enabled ? "未启用" : failed ? "采集失败" : running ? "采集中" : "自动采集";
+  return (
+    <div className="mb-4 flex flex-col gap-3 rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 py-3 sm:mb-6 sm:flex-row sm:items-center sm:justify-between sm:px-4">
+      <div className="flex min-w-0 items-start gap-3">
+        <div className={`mt-0.5 rounded-lg p-2 ${failed ? "bg-red-500/10 text-red-500" : "bg-violet-500/10 text-violet-500"}`}>
+          <Sparkles className={`h-4 w-4 ${running ? "animate-pulse" : ""}`} />
+        </div>
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
+            飞书聊天增量采集
+            <span className={`rounded-full px-2 py-0.5 text-[10px] ${failed ? "bg-red-500/10 text-red-600" : running ? "bg-violet-500/10 text-violet-600" : enabled ? "bg-emerald-500/10 text-emerald-600" : "bg-zinc-500/10 text-zinc-500"}`}>{status}</span>
+          </div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[hsl(var(--muted-foreground))]">
+            {enabled && <span>{integration?.activeStart}–{integration?.activeEnd} · 每 {integration?.intervalMinutes} 分钟</span>}
+            <span>最近成功：{formatDate(integration?.lastSuccessEnd)}</span>
+            {enabled && <span>下次：{formatDate(integration?.nextRunAt)}</span>}
+            {latestRun?.status === "success" && <span>上轮：新建 {latestRun.created} · 更新 {latestRun.updated} · 审核 {latestRun.reviewCount} · 跳过 {latestRun.skipped}</span>}
+            {latestRun && latestRun.inputTokens > 0 && <span>Token：{latestRun.inputTokens.toLocaleString()} in / {latestRun.outputTokens.toLocaleString()} out</span>}
+            {integration?.lastError && <span className="basis-full break-words text-red-500">{integration.lastError}</span>}
+          </div>
+        </div>
+      </div>
+      <button type="button" disabled={busy || running || !enabled} onClick={onScan} className="inline-flex h-10 w-full shrink-0 items-center justify-center gap-1.5 rounded-md border border-[hsl(var(--border))] px-3 text-xs font-medium hover:bg-[hsl(var(--muted))] disabled:opacity-50 sm:h-8 sm:w-auto">
+        <RefreshCw className={`h-3.5 w-3.5 ${running ? "animate-spin" : ""}`} />{!enabled ? "尚未启用" : failed ? "立即重试" : running ? "正在采集" : "立即扫描"}
       </button>
     </div>
   );
@@ -446,6 +487,41 @@ export function PendingCard({ demand, projects, disabled, onConfirm, onDismiss }
   );
 }
 
+export function ReviewCard({ review, demands, disabled, onAccept, onDismiss }: {
+  review: DemandReview;
+  demands: Demand[];
+  disabled: boolean;
+  onAccept: (id: string, demandId?: string) => void;
+  onDismiss: (id: string) => void;
+}) {
+  const [demandId, setDemandId] = useState(review.suggestedDemandId ?? "");
+  const suggested = demands.find((demand) => demand.id === review.suggestedDemandId);
+  return (
+    <article className="min-w-0 overflow-hidden rounded-xl border border-violet-500/25 bg-[hsl(var(--card))] shadow-sm shadow-black/[0.02]">
+      <div className="p-4 sm:p-5">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-full bg-violet-500/10 px-2 py-0.5 text-[10px] font-medium text-violet-700 dark:text-violet-300">进展待审核</span>
+          <span className="text-[10px] text-[hsl(var(--muted-foreground))]">关联置信度 {Math.round(review.confidence * 100)}%</span>
+        </div>
+        <h2 className="mt-3 break-words text-lg font-semibold leading-7">{suggested ? `追加到：${suggested.title}` : "请选择要追加进展的需求"}</h2>
+        <div className="mt-3 rounded-lg bg-violet-500/[0.07] px-3 py-2.5 text-sm leading-6"><span className="font-medium text-violet-700 dark:text-violet-300">候选进展：</span>{review.progressText}</div>
+        {review.rationale && <p className="mt-2 text-xs leading-5 text-[hsl(var(--muted-foreground))]">为什么需要确认：{review.rationale}</p>}
+        <div className="mt-4"><SourceEvidence source={review.source} /></div>
+      </div>
+      <div className="border-t border-[hsl(var(--border))] bg-[hsl(var(--muted)/0.28)] p-3 sm:flex sm:items-center sm:justify-between sm:gap-3 sm:px-5">
+        <select aria-label="关联需求" value={demandId} onChange={(event) => setDemandId(event.target.value)} className={`${inputClass} min-w-0 sm:max-w-xl`}>
+          <option value="">选择需求</option>
+          {sortDemands(demands.filter((demand) => demand.status !== "dismissed" && demand.status !== "done")).map((demand) => <option key={demand.id} value={demand.id}>{demand.title}</option>)}
+        </select>
+        <div className="mt-3 grid shrink-0 grid-cols-2 gap-2 sm:mt-0 sm:flex">
+          <button disabled={disabled} type="button" onClick={() => onDismiss(review.id)} className="inline-flex h-10 items-center justify-center gap-1.5 rounded-md border border-[hsl(var(--border))] px-3 text-sm hover:bg-[hsl(var(--muted))] disabled:opacity-50 sm:h-9"><X className="h-4 w-4" />忽略</button>
+          <button disabled={disabled || !demandId} type="button" onClick={() => onAccept(review.id, demandId)} className="inline-flex h-10 items-center justify-center gap-1.5 rounded-md bg-[hsl(var(--foreground))] px-3 text-sm font-medium text-[hsl(var(--background))] disabled:opacity-50 sm:h-9"><Check className="h-4 w-4" />确认追加</button>
+        </div>
+      </div>
+    </article>
+  );
+}
+
 function DetailDrawer({ id, projects, loadDemand, onClose, onSave, onProgress }: {
   id: string | null; projects: Project[]; loadDemand: (id: string) => Promise<Demand>;
   onClose: () => void; onSave: (id: string, patch: DemandPatch) => Promise<boolean>; onProgress: (id: string, text: string) => Promise<boolean>;
@@ -667,14 +743,19 @@ export function WorkbenchPage({ section, onSectionChange }: WorkbenchPageProps) 
   const openProject = (id: string) => { setProjectFilter(id); onSectionChange?.("demands"); };
   return (
     <div data-testid="workbench-shell" className="h-full min-h-0 overflow-hidden bg-[linear-gradient(145deg,hsl(var(--background))_0%,hsl(var(--muted)/0.55)_100%)] lg:flex">
-      <WorkbenchNav section={section} pendingCount={pending.length} onChange={onSectionChange} />
+      <WorkbenchNav section={section} pendingCount={pending.length + workbench.reviews.length} onChange={onSectionChange} />
       <div data-testid="workbench-scroll-region" className="h-full min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain pb-20 lg:[scrollbar-gutter:stable] lg:pb-0"><div className="mx-auto max-w-[1500px] px-3 py-4 sm:px-6 sm:py-6 lg:px-10 lg:py-8">
         <SyncBar integration={workbench.integration} busy={workbench.mutating} onSync={() => void workbench.syncFeishu()} />
+        <IngestionBar integration={workbench.chatIntegration} latestRun={workbench.ingestionRuns[0]} busy={workbench.mutating} onScan={() => void workbench.scanFeishu()} />
         {workbench.error && <ErrorBanner message={workbench.error} onRetry={() => void workbench.refresh()} />}
         {workbench.loading && workbench.demands.length === 0 ? <div className="flex items-center justify-center gap-2 py-28 text-sm text-[hsl(var(--muted-foreground))]"><LoaderCircle className="h-5 w-5 animate-spin" />正在加载工作台…</div> : <>
           {section === "pending" && <>
             <PageTitle kicker="AI INBOX" title="待确认" description="先用标题、摘要、下一步和证据判断候选是否成立；需要修正时再展开编辑。" />
-            <div className="mt-6 space-y-3">{pending.map((demand) => <PendingCard key={demand.id} demand={demand} projects={workbench.projects} disabled={workbench.mutating} onConfirm={(id, status, patch) => void workbench.confirmDemand(id, status, patch)} onDismiss={(id) => void workbench.dismissDemand(id)} />)}{pending.length === 0 && <div className="rounded-xl border border-dashed border-[hsl(var(--border))] py-16 text-center"><Check className="mx-auto h-7 w-7 text-emerald-500" /><div className="mt-3 font-medium">待确认已清空</div><div className="mt-1 text-sm text-[hsl(var(--muted-foreground))]">新的飞书提取结果会先进入这里。</div></div>}</div>
+            <div className="mt-6 space-y-3">
+              {workbench.reviews.map((review) => <ReviewCard key={review.id} review={review} demands={workbench.demands} disabled={workbench.mutating} onAccept={(id, demandId) => void workbench.acceptReview(id, demandId)} onDismiss={(id) => void workbench.dismissReview(id)} />)}
+              {pending.map((demand) => <PendingCard key={demand.id} demand={demand} projects={workbench.projects} disabled={workbench.mutating} onConfirm={(id, status, patch) => void workbench.confirmDemand(id, status, patch)} onDismiss={(id) => void workbench.dismissDemand(id)} />)}
+              {pending.length === 0 && workbench.reviews.length === 0 && <div className="rounded-xl border border-dashed border-[hsl(var(--border))] py-16 text-center"><Check className="mx-auto h-7 w-7 text-emerald-500" /><div className="mt-3 font-medium">待确认已清空</div><div className="mt-1 text-sm text-[hsl(var(--muted-foreground))]">新的飞书提取结果和歧义进展会先进入这里。</div></div>}
+            </div>
           </>}
           {section === "demands" && <>
             <PageTitle kicker="DEMANDS" title="需求清单" description="所有正式需求采用统一粒度；状态、优先级和项目只是筛选及组织方式。" action={<div className="flex w-full items-center justify-between gap-3 sm:w-auto sm:justify-end"><span className="text-sm text-[hsl(var(--muted-foreground))]">{visible.length} 条结果</span><button type="button" onClick={() => setCreateKind("demand")} className="inline-flex h-10 items-center gap-1.5 rounded-md bg-[hsl(var(--foreground))] px-3 text-sm font-medium text-[hsl(var(--background))] sm:h-9"><Plus className="h-4 w-4" />新建需求</button></div>} />
