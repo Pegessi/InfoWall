@@ -20,8 +20,8 @@ func TestAgentSpecJSONIsMachineDiscoverable(t *testing.T) {
 	if spec.SpecVersion != agentSpecVersion || len(spec.Commands) == 0 {
 		t.Fatalf("incomplete spec: %+v", spec)
 	}
-	if spec.SpecVersion != "6" {
-		t.Fatalf("expected agent spec v6, got %q", spec.SpecVersion)
+	if spec.SpecVersion != "7" {
+		t.Fatalf("expected agent spec v7, got %q", spec.SpecVersion)
 	}
 	if got := strings.Join(spec.Enums["demand_status"], ","); !strings.Contains(got, "dismissed") {
 		t.Fatalf("demand status enum is incomplete: %q", got)
@@ -55,7 +55,8 @@ func TestAgentSpecJSONIsMachineDiscoverable(t *testing.T) {
 	}
 	if !strings.Contains(autoQuality["self_relevance"].(string), "before Codex") ||
 		!strings.Contains(autoQuality["identity"].(string), "open_id") ||
-		!strings.Contains(autoQuality["identity"].(string), "needs_refresh") {
+		!strings.Contains(autoQuality["identity"].(string), "needs_refresh") ||
+		!strings.Contains(autoQuality["message_ids"].(string), "JSON Schema") {
 		t.Fatalf("missing self-relevance gate: %+v", autoQuality)
 	}
 	linkQuality, ok := spec.Quality["progress_links"].(map[string]any)

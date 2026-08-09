@@ -2,6 +2,7 @@ package feishuingest
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,6 +10,35 @@ import (
 	"testing"
 	"time"
 )
+
+func TestAnalysisSchemaRestrictsEveryReturnedMessageID(t *testing.T) {
+	allowed := analysisMessageIDs([]AnalysisInput{{
+		Messages:   []Message{{ID: "om_context"}, {ID: "om_candidate"}},
+		Candidates: []Message{{ID: "om_candidate"}},
+	}})
+	if strings.Join(allowed, ",") != "om_candidate,om_context" {
+		t.Fatalf("allowed IDs = %v", allowed)
+	}
+	raw, err := analysisSchemaFor(allowed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatal(err)
+	}
+	definitions := schema["$defs"].(map[string]any)
+	messageID := definitions["message_id"].(map[string]any)
+	enum := messageID["enum"].([]any)
+	if len(enum) != 2 || enum[0] != "om_candidate" || enum[1] != "om_context" {
+		t.Fatalf("message ID enum = %+v", enum)
+	}
+	source := definitions["source"].(map[string]any)
+	externalID := source["properties"].(map[string]any)["external_id"].(map[string]any)
+	if externalID["$ref"] != "#/$defs/message_id" {
+		t.Fatalf("source external_id is not allowlisted: %+v", externalID)
+	}
+}
 
 func TestCodexTimeoutKillsLauncherProcessGroup(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -39,5 +69,13 @@ func TestDecodeAnalysisResultUsesServerOwnedEvidenceMetadata(t *testing.T) {
 	}
 	if len(result.NewDemands) != 1 || result.NewDemands[0].Sources[0].ExternalID != message.ID {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestDecodeAnalysisResultStillRejectsUnknownMessageID(t *testing.T) {
+	message := Message{ID: "om_allowed", SenderType: "user", Content: "需求"}
+	raw := []byte(`{"new_demands":[],"progress_updates":[],"reviews":[],"skipped_message_ids":["om_unknown"],"missing_context_message_ids":["om_allowed"]}`)
+	if _, err := decodeAnalysisResult(raw, []AnalysisInput{{Messages: []Message{message}, Candidates: []Message{message}}}); err == nil || !strings.Contains(err.Error(), "unknown message") {
+		t.Fatalf("unknown message ID was accepted: %v", err)
 	}
 }

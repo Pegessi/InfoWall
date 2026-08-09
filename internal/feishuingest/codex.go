@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -29,7 +30,12 @@ func (a CodexAnalyzer) Analyze(ctx context.Context, batches []AnalysisInput) (Re
 	if candidateCount == 0 {
 		return Result{}, nil
 	}
-	inputJSON, err := json.Marshal(map[string]any{"batches": batches})
+	allowedMessageIDs := analysisMessageIDs(batches)
+	inputJSON, err := json.Marshal(map[string]any{"batches": batches, "allowed_message_ids": allowedMessageIDs})
+	if err != nil {
+		return Result{}, err
+	}
+	schemaJSON, err := analysisSchemaFor(allowedMessageIDs)
 	if err != nil {
 		return Result{}, err
 	}
@@ -40,7 +46,7 @@ func (a CodexAnalyzer) Analyze(ctx context.Context, batches []AnalysisInput) (Re
 	defer os.RemoveAll(temporary)
 	schemaPath := filepath.Join(temporary, "schema.json")
 	outputPath := filepath.Join(temporary, "result.json")
-	if err := os.WriteFile(schemaPath, []byte(analysisSchema), 0o600); err != nil {
+	if err := os.WriteFile(schemaPath, schemaJSON, 0o600); err != nil {
 		return Result{}, err
 	}
 	path := a.Path
@@ -102,6 +108,46 @@ func (a CodexAnalyzer) Analyze(ctx context.Context, batches []AnalysisInput) (Re
 	result.CachedInputTokens = usage.CachedInputTokens
 	result.OutputTokens = usage.OutputTokens
 	return result, nil
+}
+
+func analysisMessageIDs(batches []AnalysisInput) []string {
+	seen := make(map[string]struct{})
+	for _, batch := range batches {
+		for _, messages := range [][]Message{batch.Messages, batch.Candidates} {
+			for _, message := range messages {
+				if id := strings.TrimSpace(message.ID); id != "" {
+					seen[id] = struct{}{}
+				}
+			}
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for id := range seen {
+		result = append(result, id)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func analysisSchemaFor(allowedMessageIDs []string) ([]byte, error) {
+	var schema map[string]any
+	if err := json.Unmarshal([]byte(analysisSchema), &schema); err != nil {
+		return nil, fmt.Errorf("decode analysis schema: %w", err)
+	}
+	definitions, ok := schema["$defs"].(map[string]any)
+	if !ok {
+		return nil, errors.New("analysis schema is missing $defs")
+	}
+	messageID, ok := definitions["message_id"].(map[string]any)
+	if !ok {
+		return nil, errors.New("analysis schema is missing message_id definition")
+	}
+	messageID["enum"] = allowedMessageIDs
+	encoded, err := json.Marshal(schema)
+	if err != nil {
+		return nil, fmt.Errorf("encode analysis schema: %w", err)
+	}
+	return encoded, nil
 }
 
 func decodeAnalysisResult(raw []byte, batches []AnalysisInput) (Result, error) {
@@ -266,6 +312,7 @@ The input contains conversation/thread batches. Reconcile across batches when st
 Rules:
 - A new demand must be a durable actionable need, not routine chatter. Title format: action + business object/component + concrete result/problem; IDs only at the end. Keep the title within 56 display characters (the hard schema limit is 80). Include background/current state/problem in description and one executable next_action. project_hint is a suggestion only.
 - Persist only minimum evidence. Return only external_id=message_id plus a short excerpt. InfoWall resolves sender/chat/time/url and creates the stable dedupe key; never invent or copy those fields.
+- Every returned external_id, skipped_message_id, and missing_context_message_id must be copied exactly from top-level allowed_message_ids. Never use IDs from existing_snapshot, linked resources, prose, or memory. The output schema enforces this allowlist.
 - linked_resources contains only metadata already read by InfoWall. Use it to identify the business subject and verified state; never access its URL yourself. Inaccessible resources have accessible=false, so rely on chat context or emit missing_context.
 - New demands never set project/status/priority: the service enforces pending + none + project_hint.
 - Existing demands may receive evidence/progress only. Never rewrite status, priority, project, title, description, or next action.
@@ -289,10 +336,10 @@ const analysisSchema = `{
     "reviews":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["suggested_demand_id","progress_text","progress_dedupe_key","source","confidence","rationale"],"properties":{
       "suggested_demand_id":{"type":"string"},"progress_text":{"type":"string"},"progress_dedupe_key":{"type":"string"},"source":{"$ref":"#/$defs/source"},"confidence":{"type":"number","minimum":0,"maximum":1},"rationale":{"type":"string"}
     }}},
-    "skipped_message_ids":{"type":"array","items":{"type":"string"}},
-    "missing_context_message_ids":{"type":"array","items":{"type":"string"}}
+    "skipped_message_ids":{"type":"array","items":{"$ref":"#/$defs/message_id"}},
+    "missing_context_message_ids":{"type":"array","items":{"$ref":"#/$defs/message_id"}}
   },
-	  "$defs":{"source":{"type":"object","additionalProperties":false,"required":["external_id","excerpt"],"properties":{
-	    "external_id":{"type":"string"},"excerpt":{"type":"string"}
+	  "$defs":{"message_id":{"type":"string"},"source":{"type":"object","additionalProperties":false,"required":["external_id","excerpt"],"properties":{
+	    "external_id":{"$ref":"#/$defs/message_id"},"excerpt":{"type":"string"}
   }}}
 }`

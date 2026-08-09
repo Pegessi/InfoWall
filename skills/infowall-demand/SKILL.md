@@ -19,6 +19,8 @@ Automatic ingestion has a server-enforced current-user relevance gate before Cod
 
 The collector resolves the current user through `lark-cli auth status --json`. A user identity with `available=true` and a non-empty `openId` is usable in both `ready` and `needs_refresh` states; the following user API call performs the token refresh. Fail closed only when the identity is unavailable or lacks an open ID, and never advance the watermark after a real refresh/auth failure.
 
+The automatic runner supplies `allowed_message_ids` and dynamically constrains every source, skipped ID, and missing-context ID to that set in its output schema. Copy IDs only from that allowlist. Never cite a message ID found only in `existing_snapshot`, a resource excerpt, ordinary prose, or model memory.
+
 ## Collect the bounded window
 
 1. Default to Monday 00:00:00 of the current calendar week through now in UTC+08:00. Honor an explicitly requested window instead.
