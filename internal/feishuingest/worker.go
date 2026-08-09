@@ -188,16 +188,20 @@ func (w *Worker) runWindow(ctx context.Context, trigger string, start, end time.
 		commit.NewDemands = append(commit.NewDemands, demand)
 	}
 	for _, update := range result.ProgressUpdates {
+		message := messages[update.Source.ExternalID]
 		commit.ProgressUpdates = append(commit.ProgressUpdates, model.DemandProgressUpdate{
 			DemandID: update.DemandID, Text: update.Text, DedupeKey: update.DedupeKey,
-			Source:     canonicalSource(messages[update.Source.ExternalID], update.Source.Excerpt),
+			Source:     canonicalSource(message, update.Source.Excerpt),
+			Links:      progressLinksForMessage(message, resources),
 			Confidence: update.Confidence, Anchors: update.Anchors})
 	}
 	for _, item := range result.Reviews {
+		message := messages[item.Source.ExternalID]
 		commit.Reviews = append(commit.Reviews, model.DemandReview{Kind: "progress",
 			SuggestedDemandID: item.SuggestedDemandID, ProgressText: item.ProgressText,
 			ProgressDedupeKey: item.ProgressDedupeKey,
-			Source:            canonicalSource(messages[item.Source.ExternalID], item.Source.Excerpt),
+			Source:            canonicalSource(message, item.Source.Excerpt),
+			Links:             progressLinksForMessage(message, resources),
 			Confidence:        item.Confidence, Rationale: item.Rationale})
 	}
 	_, err = w.Backend.CompleteFeishuIngestion(ctx, commit)
@@ -386,6 +390,50 @@ func resourceSource(resource Resource) model.Source {
 	excerpt := strings.Join(parts, " · ")
 	return model.Source{Kind: resource.Kind, ExternalID: resource.ExternalID, URL: resource.URL,
 		Excerpt: truncateRunes(excerpt, 700), DedupeKey: resource.DedupeKey, CreatedAt: time.Now().UTC()}
+}
+
+func progressLinksForMessage(message Message, resources []Resource) []model.ProgressLink {
+	links := make([]model.ProgressLink, 0, 1+len(resources))
+	if strings.TrimSpace(message.URL) != "" {
+		links = append(links, model.ProgressLink{Kind: "feishu-im", ExternalID: message.ID,
+			Title: "飞书原消息", URL: message.URL, DedupeKey: "feishu-im:" + message.ID})
+	}
+	for _, resource := range resourcesForMessage(message, resources) {
+		if strings.TrimSpace(resource.URL) == "" {
+			continue
+		}
+		title := strings.TrimSpace(resource.Title)
+		if title == "" {
+			title = resourceLinkTitle(resource.Kind, resource.ExternalID)
+		}
+		links = append(links, model.ProgressLink{Kind: resource.Kind, ExternalID: resource.ExternalID,
+			Title: title, URL: resource.URL, State: resource.State, DedupeKey: resource.DedupeKey})
+	}
+	return links
+}
+
+func resourceLinkTitle(kind, externalID string) string {
+	label := "相关资源"
+	switch kind {
+	case "codebase-mr":
+		label = "Codebase MR"
+	case "feishu-doc":
+		label = "飞书文档"
+	case "feishu-wiki":
+		label = "飞书 Wiki"
+	case "feishu-minutes":
+		label = "飞书妙记"
+	case "seed-jobrun":
+		label = "JobRun"
+	case "arena-eval":
+		label = "Arena 评测"
+	case "model-card":
+		label = "Model Card"
+	}
+	if strings.TrimSpace(externalID) != "" {
+		return label + " · " + externalID
+	}
+	return label
 }
 
 func dedupeModelSources(sources []model.Source) []model.Source {

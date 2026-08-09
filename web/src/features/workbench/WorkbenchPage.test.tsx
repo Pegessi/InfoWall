@@ -134,6 +134,19 @@ describe("DemandCard", () => {
     expect(onUpdate).toHaveBeenCalledWith({ priority: "p3" });
     expect(onOpen).not.toHaveBeenCalled();
   });
+
+  it("renders latest progress resources as direct links without opening the drawer", () => {
+    const onOpen = vi.fn();
+    render(<DemandCard demand={{ ...demand, status: "active", progress: [{
+      id: "progress-1", text: "服务已拉起", createdAt: "2026-08-09T10:00:00+08:00",
+      links: [{ kind: "seed-jobrun", title: "MIX Serving JobRun", url: "https://example.test/jobrun/1", state: "RUNNING" }],
+    }] }} project={project} onOpen={onOpen} onUpdate={vi.fn()} />);
+
+    const link = screen.getByRole("link", { name: /MIX Serving JobRun/ });
+    expect(link.getAttribute("href")).toBe("https://example.test/jobrun/1");
+    fireEvent.click(link);
+    expect(onOpen).not.toHaveBeenCalled();
+  });
 });
 
 describe("ReviewCard", () => {
@@ -145,6 +158,7 @@ describe("ReviewCard", () => {
       confidence: 0.72, rationale: "组件相同，但聊天同时提到两个部署需求。",
       createdAt: "2026-08-09T10:00:00+08:00",
       source: { kind: "feishu-im", label: "已完成首轮灰度", excerpt: "已完成首轮灰度", senderName: "需求提出人" },
+      links: [{ kind: "feishu-doc", title: "灰度验收记录", url: "https://example.test/doc/gray" }],
     };
     const onAccept = vi.fn();
     const onDismiss = vi.fn();
@@ -153,6 +167,7 @@ describe("ReviewCard", () => {
     expect(screen.getByText(`追加到：${demand.title}`)).toBeTruthy();
     expect(screen.getByText("已完成首轮灰度，等待扩大实例范围。")).toBeTruthy();
     expect(screen.getByLabelText("关联需求")).toHaveProperty("value", demand.id);
+    expect(screen.getByRole("link", { name: /灰度验收记录/ }).getAttribute("href")).toBe("https://example.test/doc/gray");
     fireEvent.click(screen.getByRole("button", { name: "确认追加" }));
     expect(onAccept).toHaveBeenCalledWith(review.id, demand.id);
     fireEvent.click(screen.getByRole("button", { name: "忽略" }));

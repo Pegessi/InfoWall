@@ -150,7 +150,7 @@ Examples:
   infowall db backup --out backups/wall.db    # safe live backup (VACUUM INTO)
   infowall demand create --title "排查吞吐下降" --status pending --json
   infowall demand apply --input demands.json --json
-  infowall demand progress DEMAND_ID --text "已收集日志" --json
+  infowall demand progress DEMAND_ID --text "已收集日志" --link "https://logs.example/run/1" --json
   infowall project create --name "M15 性能" --json
   infowall sync feishu setup --create --json
 

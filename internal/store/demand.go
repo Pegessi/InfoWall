@@ -222,7 +222,6 @@ func loadDemandRelations(ctx context.Context, q demandQueryer, demand *model.Dem
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var progress model.Progress
 		var createdRaw any
@@ -231,9 +230,50 @@ func loadDemandRelations(ctx context.Context, q demandQueryer, demand *model.Dem
 			return err
 		}
 		progress.CreatedAt = parseSQLiteTime(createdRaw)
+		progress.Links = []model.ProgressLink{}
 		demand.Progress = append(demand.Progress, progress)
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	linksByProgress := make(map[string][]model.ProgressLink)
+	rows, err = q.QueryContext(ctx, `SELECT links.progress_id, links.kind, links.external_id,
+		links.title, links.url, links.state, links.dedupe_key
+		FROM demand_progress_links AS links
+		JOIN demand_progress AS progress ON progress.id = links.progress_id
+		WHERE progress.demand_id = ?
+		ORDER BY progress.created_at, links.position, links.dedupe_key`, demand.ID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var progressID string
+		var link model.ProgressLink
+		if err := rows.Scan(&progressID, &link.Kind, &link.ExternalID, &link.Title,
+			&link.URL, &link.State, &link.DedupeKey); err != nil {
+			rows.Close()
+			return err
+		}
+		linksByProgress[progressID] = append(linksByProgress[progressID], link)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for i := range demand.Progress {
+		if links := linksByProgress[demand.Progress[i].ID]; links != nil {
+			demand.Progress[i].Links = links
+		}
+	}
+	return nil
 }
 
 func (s *Store) UpdateDemand(ctx context.Context, id string, update DemandUpdate) (*model.Demand, error) {
@@ -319,12 +359,17 @@ func (s *Store) AddDemandProgress(ctx context.Context, demandID, text string) (*
 }
 
 func (s *Store) AddDemandProgressWithSource(ctx context.Context, demandID, text string, source *model.Source) (*model.Progress, error) {
+	return s.AddDemandProgressWithSourceAndLinks(ctx, demandID, text, source, nil)
+}
+
+func (s *Store) AddDemandProgressWithSourceAndLinks(ctx context.Context, demandID, text string, source *model.Source, links []model.ProgressLink) (*model.Progress, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil, fmt.Errorf("progress text is required")
 	}
 	now := time.Now().UTC()
-	progress := &model.Progress{ID: uuid.NewString(), DemandID: demandID, Text: text, CreatedAt: now}
+	progress := &model.Progress{ID: uuid.NewString(), DemandID: demandID, Text: text,
+		Links: progressLinksWithSource(links, source), CreatedAt: now}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -337,9 +382,7 @@ func (s *Store) AddDemandProgressWithSource(ctx context.Context, demandID, text 
 		}
 		return nil, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO demand_progress (id, demand_id, text, dedupe_key, created_at)
-		VALUES (?, ?, ?, ?, ?)`, progress.ID, progress.DemandID, progress.Text,
-		progress.DedupeKey, progress.CreatedAt); err != nil {
+	if err := insertProgressTx(ctx, tx, progress); err != nil {
 		return nil, err
 	}
 	if source != nil {
@@ -508,9 +551,7 @@ func insertDemandTx(ctx context.Context, tx *sql.Tx, demand *model.Demand) error
 		if progress.CreatedAt.IsZero() {
 			progress.CreatedAt = demand.CreatedAt
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO demand_progress (id, demand_id, text, dedupe_key, created_at)
-			VALUES (?, ?, ?, ?, ?)`, progress.ID, demand.ID, progress.Text,
-			strings.TrimSpace(progress.DedupeKey), progress.CreatedAt.UTC()); err != nil {
+		if err := insertProgressTx(ctx, tx, progress); err != nil {
 			return fmt.Errorf("insert demand progress: %w", err)
 		}
 	}
@@ -608,22 +649,32 @@ func mergeImportedProgressTx(ctx context.Context, tx *sql.Tx, demandID string, e
 		if progress.Text == "" {
 			continue
 		}
-		duplicate := false
-		for _, current := range existing {
+		var duplicate *model.Progress
+		for currentIndex := range existing {
+			current := &existing[currentIndex]
 			if progress.DedupeKey != "" && progress.DedupeKey == current.DedupeKey {
-				duplicate = true
+				duplicate = current
 				break
 			}
 			if progress.ID != "" && progress.ID == current.ID {
-				duplicate = true
+				duplicate = current
 				break
 			}
 			if progress.Text == current.Text && progress.CreatedAt.Equal(current.CreatedAt) {
-				duplicate = true
+				duplicate = current
 				break
 			}
 		}
-		if duplicate {
+		if duplicate != nil {
+			links, normalizeErr := normalizeProgressLinks(progress.Links, progress.Text)
+			if normalizeErr != nil {
+				return false, normalizeErr
+			}
+			linksChanged, insertErr := insertProgressLinksTx(ctx, tx, duplicate.ID, links)
+			if insertErr != nil {
+				return false, insertErr
+			}
+			changed = changed || linksChanged
 			continue
 		}
 		if progress.ID == "" {
@@ -633,9 +684,7 @@ func mergeImportedProgressTx(ctx context.Context, tx *sql.Tx, demandID string, e
 		if progress.CreatedAt.IsZero() {
 			progress.CreatedAt = time.Now().UTC()
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO demand_progress (id, demand_id, text, dedupe_key, created_at)
-			VALUES (?, ?, ?, ?, ?)`, progress.ID, demandID, progress.Text,
-			strings.TrimSpace(progress.DedupeKey), progress.CreatedAt.UTC()); err != nil {
+		if err := insertProgressTx(ctx, tx, &progress); err != nil {
 			if isUniqueConstraint(err) {
 				continue
 			}
@@ -682,6 +731,9 @@ func cloneDemand(source *model.Demand) *model.Demand {
 	copy.ProjectID = cloneStringPointer(source.ProjectID)
 	copy.Sources = append([]model.Source(nil), source.Sources...)
 	copy.Progress = append([]model.Progress(nil), source.Progress...)
+	for i := range copy.Progress {
+		copy.Progress[i].Links = append([]model.ProgressLink(nil), source.Progress[i].Links...)
+	}
 	return &copy
 }
 

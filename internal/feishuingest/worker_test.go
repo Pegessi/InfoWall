@@ -25,6 +25,12 @@ type fakeAnalyzer struct {
 	err    error
 }
 
+type fakeEnricher struct{ resources []Resource }
+
+func (enricher fakeEnricher) Enrich(context.Context, []Message) []Resource {
+	return enricher.resources
+}
+
 func (analyzer *fakeAnalyzer) Analyze(context.Context, []AnalysisInput) (Result, error) {
 	analyzer.calls++
 	return analyzer.result, analyzer.err
@@ -89,6 +95,31 @@ func TestWorkerFailureDoesNotCompleteWindow(t *testing.T) {
 	}
 	if backend.failed != 1 || len(backend.completed) != 0 {
 		t.Fatalf("failed analysis advanced completion: failed=%d commits=%d", backend.failed, len(backend.completed))
+	}
+}
+
+func TestWorkerAttachesMessageAndResourceLinksToProgress(t *testing.T) {
+	resourceURL := "https://example.test/docx/doc-1"
+	message := Message{ID: "new", ChatID: "chat-1", ChatName: "服务讨论", SenderType: "user",
+		Content: "验收结果见 " + resourceURL, URL: "https://example.test/message/new", CreatedAt: time.Now()}
+	backend := &fakeBackend{newIDs: map[string]bool{"new": true}}
+	analyzer := &fakeAnalyzer{result: Result{ProgressUpdates: []ProgressUpdate{{
+		DemandID: "demand-1", Text: "验收结果已更新", DedupeKey: "feishu-progress:new:demand-1",
+		Source: EvidenceRef{ExternalID: "new", Excerpt: "验收结果"}, Confidence: 0.95,
+		Anchors: []string{"demand-1", "验收"},
+	}}}}
+	worker := NewWorker(backend, fakeCollector{result: Collection{Messages: []Message{message}, Candidates: []Message{message}, Seen: 1}}, analyzer)
+	worker.Enricher = fakeEnricher{resources: []Resource{{Kind: "feishu-doc", ExternalID: "doc-1",
+		URL: resourceURL, Title: "服务验收记录", State: "ready", DedupeKey: "feishu-doc:doc-1", Accessible: true}}}
+	if err := worker.runWindow(context.Background(), "manual", time.Now().Add(-time.Hour), time.Now(), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(backend.completed) != 1 || len(backend.completed[0].ProgressUpdates) != 1 {
+		t.Fatalf("unexpected commit: %+v", backend.completed)
+	}
+	links := backend.completed[0].ProgressUpdates[0].Links
+	if len(links) != 2 || links[0].Kind != "feishu-im" || links[1].Title != "服务验收记录" {
+		t.Fatalf("progress evidence links were lost: %+v", links)
 	}
 }
 

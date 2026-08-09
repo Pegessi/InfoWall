@@ -25,6 +25,7 @@ import type {
   Demand,
   DemandPatch,
   DemandPriority,
+  DemandProgressLink,
   DemandSource,
   DemandStatus,
   DemandReview,
@@ -309,10 +310,66 @@ function sourceKindLabel(kind: string): string {
     case "feishu-wiki": return "飞书 Wiki";
     case "feishu-minutes": return "飞书妙记";
     case "trial": return "Trial";
+    case "seed-jobrun": return "JobRun";
+    case "arena-eval": return "Arena 评测";
+    case "model-card": return "Model Card";
     case "insight": return "Insight";
     case "agent": return "Agent";
     default: return kind || "来源记录";
   }
+}
+
+function safeHTTPURL(value: string): string | undefined {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function ProgressLinks({ links = [], compact = false }: { links?: DemandProgressLink[]; compact?: boolean }) {
+  const visible = links.flatMap((link) => {
+    const url = safeHTTPURL(link.url);
+    return url ? [{ ...link, url }] : [];
+  });
+  if (!visible.length) return null;
+  return (
+    <div aria-label="相关资源" className={`flex min-w-0 flex-wrap ${compact ? "mt-1.5 gap-1" : "mt-2 gap-1.5"}`}>
+      {visible.map((link, index) => (
+        <a
+          key={link.dedupeKey ?? `${link.url}:${index}`}
+          href={link.url}
+          target="_blank"
+          rel="noreferrer noopener"
+          title={link.externalId ? `${link.title} (${link.externalId})` : link.title}
+          onClick={(event) => event.stopPropagation()}
+          className={`inline-flex min-w-0 max-w-full items-center gap-1 rounded-md border border-blue-500/20 bg-blue-500/[0.07] text-blue-600 hover:border-blue-500/40 hover:bg-blue-500/10 hover:underline dark:text-blue-300 ${compact ? "px-1.5 py-0.5 text-[10px]" : "px-2 py-1 text-xs"}`}
+        >
+          <span className="truncate">{link.title}</span>
+          {link.state && <span className="shrink-0 text-[9px] uppercase text-[hsl(var(--muted-foreground))]">{link.state}</span>}
+          <ArrowUpRight className="h-3 w-3 shrink-0" />
+        </a>
+      ))}
+    </div>
+  );
+}
+
+function manualProgressLinks(value: string): { links: DemandProgressLink[]; invalid: string[] } {
+  const links: DemandProgressLink[] = [];
+  const invalid: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of value.split(/\r?\n/).map((part) => part.trim()).filter(Boolean)) {
+    const url = safeHTTPURL(raw);
+    if (!url) {
+      invalid.push(raw);
+      continue;
+    }
+    if (seen.has(url)) continue;
+    seen.add(url);
+    links.push({ kind: "link", title: new URL(url).hostname, url });
+  }
+  return { links, invalid };
 }
 
 function sourceDisplayName(source: DemandSource): string | undefined {
@@ -381,7 +438,7 @@ export function DemandCard({ demand, project, onOpen, onUpdate }: { demand: Dema
         <ChevronRight className="h-4 w-4 shrink-0 text-[hsl(var(--muted-foreground))] transition group-hover:translate-x-0.5" />
       </div>
       {demand.nextStep && <div className="mt-3 rounded-lg bg-[hsl(var(--muted)/0.7)] px-3 py-2 text-xs leading-5"><span className="font-medium">下一步：</span>{demand.nextStep}</div>}
-      {latest && <div className="mt-3 border-l-2 border-blue-500/30 pl-3 text-xs leading-5 text-[hsl(var(--muted-foreground))]"><span className="font-medium text-[hsl(var(--foreground))]">最近进展：</span>{latest.text}</div>}
+      {latest && <div className="mt-3 min-w-0 border-l-2 border-blue-500/30 pl-3 text-xs leading-5 text-[hsl(var(--muted-foreground))]"><span className="font-medium text-[hsl(var(--foreground))]">最近进展：</span>{latest.text}<ProgressLinks links={latest.links} compact /></div>}
       <div className="mt-3 flex flex-col gap-2 border-t border-[hsl(var(--border))] pt-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
         <span className="text-[10px] text-[hsl(var(--muted-foreground))]">更新于 {formatDate(demand.updatedAt)}</span>
         <div className="flex w-full items-center justify-end gap-2 sm:w-auto" onClick={(event) => event.stopPropagation()}>
@@ -505,6 +562,7 @@ export function ReviewCard({ review, demands, disabled, onAccept, onDismiss }: {
         </div>
         <h2 className="mt-3 break-words text-lg font-semibold leading-7">{suggested ? `追加到：${suggested.title}` : "请选择要追加进展的需求"}</h2>
         <div className="mt-3 rounded-lg bg-violet-500/[0.07] px-3 py-2.5 text-sm leading-6"><span className="font-medium text-violet-700 dark:text-violet-300">候选进展：</span>{review.progressText}</div>
+        <ProgressLinks links={review.links} />
         {review.rationale && <p className="mt-2 text-xs leading-5 text-[hsl(var(--muted-foreground))]">为什么需要确认：{review.rationale}</p>}
         <div className="mt-4"><SourceEvidence source={review.source} /></div>
       </div>
@@ -524,11 +582,13 @@ export function ReviewCard({ review, demands, disabled, onAccept, onDismiss }: {
 
 function DetailDrawer({ id, projects, loadDemand, onClose, onSave, onProgress }: {
   id: string | null; projects: Project[]; loadDemand: (id: string) => Promise<Demand>;
-  onClose: () => void; onSave: (id: string, patch: DemandPatch) => Promise<boolean>; onProgress: (id: string, text: string) => Promise<boolean>;
+  onClose: () => void; onSave: (id: string, patch: DemandPatch) => Promise<boolean>;
+  onProgress: (id: string, text: string, links?: DemandProgressLink[]) => Promise<boolean>;
 }) {
   const [demand, setDemand] = useState<Demand | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [progressText, setProgressText] = useState("");
+  const [progressURLs, setProgressURLs] = useState("");
   useEffect(() => {
     if (!id) return;
     let alive = true;
@@ -543,6 +603,7 @@ function DetailDrawer({ id, projects, loadDemand, onClose, onSave, onProgress }:
     return () => { document.body.style.overflow = previousOverflow; };
   }, [id]);
   if (!id) return null;
+  const parsedProgressLinks = manualProgressLinks(progressURLs);
   const patch = async (next: DemandPatch) => {
     if (await onSave(id, next)) setDemand(await loadDemand(id));
   };
@@ -564,7 +625,16 @@ function DetailDrawer({ id, projects, loadDemand, onClose, onSave, onProgress }:
               {demand.status === "waiting" && <label className="sm:col-span-2 text-xs text-[hsl(var(--muted-foreground))]">等待什么<input className={`${inputClass} mt-1`} defaultValue={demand.waitingFor ?? ""} onBlur={(e) => void patch({ waitingFor: e.target.value || null })} /></label>}
             </div>
             <section className="mt-8"><h3 className="font-semibold">来源证据</h3><div className="mt-3 space-y-2">{demand.sources.length ? demand.sources.map((source, index) => <SourceEvidence key={source.id ?? source.dedupeKey ?? index} source={source} />) : <div className="text-sm text-[hsl(var(--muted-foreground))]">暂无来源记录</div>}</div></section>
-            <section className="mt-8"><h3 className="font-semibold">进展时间线</h3><div className="mt-3 flex flex-col gap-2 sm:flex-row"><textarea value={progressText} onChange={(e) => setProgressText(e.target.value)} placeholder="记录刚刚发生的关键进展…" className={`${textareaClass} min-h-20 flex-1`} /><button type="button" disabled={!progressText.trim()} onClick={async () => { if (await onProgress(id, progressText.trim())) { setProgressText(""); setDemand(await loadDemand(id)); } }} className="inline-flex h-10 w-full items-center justify-center gap-1 rounded-md bg-[hsl(var(--foreground))] px-3 text-sm text-[hsl(var(--background))] disabled:opacity-50 sm:w-auto sm:self-end"><MessageSquarePlus className="h-4 w-4" />追加</button></div><div className="mt-5 space-y-4 border-l border-[hsl(var(--border))] pl-4">{[...demand.progress].reverse().map((entry) => <div key={entry.id} className="relative text-sm before:absolute before:-left-[1.22rem] before:top-1.5 before:h-2 before:w-2 before:rounded-full before:bg-blue-500"><div>{entry.text}</div><div className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">{formatDate(entry.createdAt)}</div></div>)}{!demand.progress.length && <div className="text-sm text-[hsl(var(--muted-foreground))]">还没有进展记录</div>}</div></section>
+            <section className="mt-8">
+              <h3 className="font-semibold">进展时间线</h3>
+              <div className="mt-3 grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                <textarea value={progressText} onChange={(e) => setProgressText(e.target.value)} placeholder="记录刚刚发生的关键进展…" className={`${textareaClass} min-h-20 min-w-0`} />
+                <button type="button" disabled={!progressText.trim() || parsedProgressLinks.invalid.length > 0} onClick={async () => { if (await onProgress(id, progressText.trim(), parsedProgressLinks.links)) { setProgressText(""); setProgressURLs(""); setDemand(await loadDemand(id)); } }} className="inline-flex h-10 w-full items-center justify-center gap-1 rounded-md bg-[hsl(var(--foreground))] px-3 text-sm text-[hsl(var(--background))] disabled:opacity-50 sm:w-auto sm:self-end"><MessageSquarePlus className="h-4 w-4" />追加</button>
+                <label className="min-w-0 text-xs text-[hsl(var(--muted-foreground))] sm:col-span-1">相关链接（可选，一行一个）<textarea value={progressURLs} onChange={(event) => setProgressURLs(event.target.value)} placeholder="https://…" className={`${textareaClass} mt-1 min-h-16 min-w-0 font-mono text-xs`} /></label>
+                {parsedProgressLinks.invalid.length > 0 && <div role="alert" className="break-all text-xs text-red-500 sm:col-span-2">链接必须是完整的 http(s) 地址：{parsedProgressLinks.invalid.join("，")}</div>}
+              </div>
+              <div className="mt-5 min-w-0 space-y-4 border-l border-[hsl(var(--border))] pl-4">{[...demand.progress].reverse().map((entry) => <div key={entry.id} className="relative min-w-0 text-sm before:absolute before:-left-[1.22rem] before:top-1.5 before:h-2 before:w-2 before:rounded-full before:bg-blue-500"><div className="break-words">{entry.text}</div><ProgressLinks links={entry.links} /><div className="mt-1 text-xs text-[hsl(var(--muted-foreground))]">{formatDate(entry.createdAt)}</div></div>)}{!demand.progress.length && <div className="text-sm text-[hsl(var(--muted-foreground))]">还没有进展记录</div>}</div>
+            </section>
           </>}
         </div>
       </aside>

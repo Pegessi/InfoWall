@@ -9,10 +9,20 @@ export type DemandStatus =
 export type DemandPriority = "p0" | "p1" | "p2" | "p3" | "none";
 export type WorkbenchSection = "pending" | "demands" | "projects";
 
+export interface DemandProgressLink {
+  kind: string;
+  externalId?: string;
+  title: string;
+  url: string;
+  state?: string;
+  dedupeKey?: string;
+}
+
 export interface DemandProgress {
   id: string;
   text: string;
   createdAt: string;
+  links: DemandProgressLink[];
 }
 
 export interface DemandSource {
@@ -104,6 +114,7 @@ export interface DemandReview {
   progressText: string;
   progressDedupeKey: string;
   source: DemandSource;
+  links: DemandProgressLink[];
   confidence: number;
   rationale?: string;
   createdAt: string;

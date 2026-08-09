@@ -68,7 +68,8 @@ Usage:
   infowall demand list [--status STATUS] [--project ID] [--q TEXT] [--include-dismissed] [client flags]
   infowall demand get ID [client flags]
   infowall demand update ID [the same editable fields as create] [client flags]
-  infowall demand progress ID --text TEXT [--source JSON|--source-input FILE|-] [client flags]
+  infowall demand progress ID --text TEXT [--link URL ...] [--links JSON|--links-input FILE|-]
+      [--source JSON|--source-input FILE|-] [client flags]
   infowall demand dismiss ID [client flags]
   infowall demand restore ID [client flags]
   infowall demand review list [--status pending|accepted|dismissed|all] [client flags]
@@ -263,10 +264,14 @@ func cmdDemandProgress(args []string) error {
 	text := fs.String("text", "", "progress text; may also follow ID as positional text")
 	sourceJSON := fs.String("source", "", "optional source object as inline JSON")
 	sourceInput := fs.String("source-input", "", "optional source object JSON file, or - for stdin")
+	linksJSON := fs.String("links", "", "optional structured progress link array as inline JSON")
+	linksInput := fs.String("links-input", "", "optional structured progress link array JSON file, or - for stdin")
+	var linkURLs repeatedString
+	fs.Var(&linkURLs, "link", "related http(s) URL; repeat for multiple links")
 	cfg := addClientFlags(fs)
 	parseFlags(fs, args)
 	if fs.NArg() < 1 || strings.TrimSpace(fs.Arg(0)) == "" {
-		return cfg.fail(errors.New("usage: infowall demand progress ID --text TEXT [--source JSON|--source-input FILE|-] [client flags]"))
+		return cfg.fail(errors.New("usage: infowall demand progress ID --text TEXT [--link URL ...] [--links JSON|--links-input FILE|-] [--source JSON|--source-input FILE|-] [client flags]"))
 	}
 	if *text == "" && fs.NArg() > 1 {
 		*text = strings.Join(fs.Args()[1:], " ")
@@ -278,6 +283,12 @@ func cmdDemandProgress(args []string) error {
 	}
 	if *sourceJSON != "" && *sourceInput != "" {
 		return cfg.fail(errors.New("use only one of --source and --source-input"))
+	}
+	if *linksJSON != "" && *linksInput != "" {
+		return cfg.fail(errors.New("use only one of --links and --links-input"))
+	}
+	if *sourceInput == "-" && *linksInput == "-" {
+		return cfg.fail(errors.New("stdin can supply either --source-input - or --links-input -, not both"))
 	}
 
 	payload := map[string]any{"text": strings.TrimSpace(*text)}
@@ -295,6 +306,28 @@ func cmdDemandProgress(args []string) error {
 			return cfg.fail(err)
 		}
 		payload["source"] = source
+	}
+	links := make([]any, 0, len(linkURLs))
+	for _, raw := range linkURLs {
+		links = append(links, map[string]any{"url": strings.TrimSpace(raw)})
+	}
+	if *linksJSON != "" || *linksInput != "" {
+		raw := []byte(*linksJSON)
+		var err error
+		if *linksInput != "" {
+			raw, err = readJSONInput(*linksInput)
+			if err != nil {
+				return cfg.fail(err)
+			}
+		}
+		structured, err := decodeJSONArray(raw, "progress links")
+		if err != nil {
+			return cfg.fail(err)
+		}
+		links = append(links, structured...)
+	}
+	if len(links) > 0 {
+		payload["links"] = links
 	}
 
 	path := demandPath(fs.Arg(0)) + "/progress"
@@ -731,6 +764,28 @@ func decodeJSONObject(raw []byte, label string) (map[string]any, error) {
 		return nil, fmt.Errorf("%s must be a JSON object", label)
 	}
 	return object, nil
+}
+
+func decodeJSONArray(raw []byte, label string) ([]any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, fmt.Errorf("decode %s JSON: %w", label, err)
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return nil, err
+	}
+	array, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be a JSON array", label)
+	}
+	for index, item := range array {
+		if _, ok := item.(map[string]any); !ok {
+			return nil, fmt.Errorf("%s item %d must be a JSON object", label, index)
+		}
+	}
+	return array, nil
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {

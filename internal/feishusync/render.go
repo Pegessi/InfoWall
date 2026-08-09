@@ -30,9 +30,16 @@ type DemandView struct {
 	NextAction     string
 	BlockedReason  string
 	LatestProgress string
+	ProgressLinks  []ProgressLinkView
 	SourceURL      string
 	UpdatedAt      time.Time
 	CompletedAt    *time.Time
+}
+
+type ProgressLinkView struct {
+	Title string
+	URL   string
+	State string
 }
 
 type Snapshot struct {
@@ -164,7 +171,24 @@ func renderTable(demands []DemandView, projects map[string]string) string {
 		if demand.Status == "waiting" && demand.BlockedReason != "" {
 			progress += " / 等待：" + demand.BlockedReason
 		}
-		b.WriteString(`<td>` + escape(defaultString(progress, "—")) + `</td>`)
+		progressXML := escape(defaultString(progress, "—"))
+		if len(demand.ProgressLinks) > 0 {
+			parts := make([]string, 0, len(demand.ProgressLinks))
+			for _, link := range demand.ProgressLinks {
+				if strings.TrimSpace(link.URL) == "" {
+					continue
+				}
+				label := defaultString(link.Title, "相关链接")
+				if link.State != "" {
+					label += "（" + link.State + "）"
+				}
+				parts = append(parts, `<a href="`+escapeAttr(link.URL)+`">`+escape(label)+`</a>`)
+			}
+			if len(parts) > 0 {
+				progressXML += `<br/>` + strings.Join(parts, ` · `)
+			}
+		}
+		b.WriteString(`<td>` + progressXML + `</td>`)
 		updated := "—"
 		if !demand.UpdatedAt.IsZero() {
 			updated = demand.UpdatedAt.In(time.Local).Format("01-02 15:04")

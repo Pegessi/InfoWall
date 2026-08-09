@@ -20,8 +20,8 @@ func TestAgentSpecJSONIsMachineDiscoverable(t *testing.T) {
 	if spec.SpecVersion != agentSpecVersion || len(spec.Commands) == 0 {
 		t.Fatalf("incomplete spec: %+v", spec)
 	}
-	if spec.SpecVersion != "4" {
-		t.Fatalf("expected agent spec v4, got %q", spec.SpecVersion)
+	if spec.SpecVersion != "5" {
+		t.Fatalf("expected agent spec v5, got %q", spec.SpecVersion)
 	}
 	if got := strings.Join(spec.Enums["demand_status"], ","); !strings.Contains(got, "dismissed") {
 		t.Fatalf("demand status enum is incomplete: %q", got)
@@ -52,6 +52,10 @@ func TestAgentSpecJSONIsMachineDiscoverable(t *testing.T) {
 	autoQuality, ok := spec.Quality["automatic_feishu_ingestion"].(map[string]any)
 	if !ok || !strings.Contains(autoQuality["window"].(string), "minus 5 minutes") {
 		t.Fatalf("missing automatic ingestion contract: %+v", spec.Quality)
+	}
+	linkQuality, ok := spec.Quality["progress_links"].(map[string]any)
+	if !ok || !strings.Contains(linkQuality["rule"].(string), "direct http(s) link") {
+		t.Fatalf("missing progress link contract: %+v", spec.Quality)
 	}
 }
 

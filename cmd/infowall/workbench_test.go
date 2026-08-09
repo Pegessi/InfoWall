@@ -227,7 +227,8 @@ func TestDemandUpdateProgressDismissRestoreCLI(t *testing.T) {
 
 	commands := [][]string{
 		{"demand", "update", "d1", "--status", "waiting", "--project=", "--blocked-reason", "等待日志", "--server", srv.URL, "--json"},
-		{"demand", "progress", "d1", "--text", "日志已到", "--source", `{"kind":"feishu-im","external_id":"om_2"}`, "--server", srv.URL, "--json"},
+		{"demand", "progress", "d1", "--text", "日志已到", "--source", `{"kind":"feishu-im","external_id":"om_2"}`,
+			"--link", "https://example.test/log/1", "--links", `[{"kind":"trial","title":"Trial 42","url":"https://example.test/trial/42"}]`, "--server", srv.URL, "--json"},
 		{"demand", "dismiss", "d1", "--server", srv.URL, "--json"},
 		{"demand", "restore", "d1", "--server", srv.URL, "--json"},
 	}
@@ -251,6 +252,9 @@ func TestDemandUpdateProgressDismissRestoreCLI(t *testing.T) {
 	}
 	if source, ok := requests[1].body["source"].(map[string]any); !ok || source["external_id"] != "om_2" {
 		t.Fatalf("progress source lost: %#v", requests[1].body)
+	}
+	if links, ok := requests[1].body["links"].([]any); !ok || len(links) != 2 {
+		t.Fatalf("progress links lost: %#v", requests[1].body)
 	}
 	if requests[2].body["status"] != "dismissed" || requests[3].body["status"] != "pending" {
 		t.Fatalf("dismiss/restore statuses wrong: %+v", requests)

@@ -127,14 +127,15 @@ func (s *Server) handlePatchDemand(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAddDemandProgress(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Text   string        `json:"text"`
-		Source *model.Source `json:"source"`
+		Text   string               `json:"text"`
+		Source *model.Source        `json:"source"`
+		Links  []model.ProgressLink `json:"links"`
 	}
 	if err := decodeJSON(r, &request); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	progress, err := s.store.AddDemandProgressWithSource(r.Context(), r.PathValue("id"), request.Text, request.Source)
+	progress, err := s.store.AddDemandProgressWithSourceAndLinks(r.Context(), r.PathValue("id"), request.Text, request.Source, request.Links)
 	if err != nil {
 		writeWorkbenchMutationError(w, err)
 		return

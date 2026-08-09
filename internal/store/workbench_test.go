@@ -47,7 +47,7 @@ func TestV1ToCurrentMigrationPreservesItems(t *testing.T) {
 	if got := userVersion(t, path); got != schemaVersion {
 		t.Fatalf("user_version = %d, want %d", got, schemaVersion)
 	}
-	for _, table := range []string{"demands", "projects", "demand_sources", "demand_progress", "feishu_sync_state", "app_settings", "feishu_ingestion_state", "feishu_ingestion_runs", "feishu_ingestion_seen", "demand_reviews"} {
+	for _, table := range []string{"demands", "projects", "demand_sources", "demand_progress", "demand_progress_links", "feishu_sync_state", "app_settings", "feishu_ingestion_state", "feishu_ingestion_runs", "feishu_ingestion_seen", "demand_reviews"} {
 		var count int
 		if err := st.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil {
 			t.Fatal(err)
@@ -55,6 +55,93 @@ func TestV1ToCurrentMigrationPreservesItems(t *testing.T) {
 		if count != 1 {
 			t.Fatalf("migration did not create table %s", table)
 		}
+	}
+}
+
+func TestV4MigrationBackfillsNamedProgressLinksFromEvidence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v4.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ddl := range []string{schema, workbenchSchema, appSettingsSchema, feishuIngestionSchema} {
+		if _, err := db.Exec(ddl); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO demands
+		(id,title,description,status,priority,created_at,updated_at) VALUES ('d1','VLM serving','', 'active','p1',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	sources := []struct{ id, kind, external, url, excerpt, key string }{
+		{"s1", "model-card", "mc30b", "https://example.test/model-card/30b", "30B VLM Model Card", "model-card:mc30b"},
+		{"s2", "seed-jobrun", "2edd6e5c33e4baca:394541347", "https://example.test/jobrun/2edd6e5c33e4baca?trialId=394541347", "RUNNING · MIX Serving", "seed-jobrun:2edd6e5c33e4baca:394541347"},
+		{"s3", "arena-eval", "ddfwxx6xox6a780f81", "https://example.test/arena/ddfwxx6xox6a780f81", "RUNNING · 长上下文对照", "arena-eval:ddfwxx6xox6a780f81"},
+	}
+	for _, source := range sources {
+		if _, err := db.Exec(`INSERT INTO demand_sources
+			(id,demand_id,kind,external_id,url,excerpt,dedupe_key,created_at) VALUES (?, 'd1', ?, ?, ?, ?, ?, ?)`,
+			source.id, source.kind, source.external, source.url, source.excerpt, source.key, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO demand_progress
+		(id,demand_id,text,dedupe_key,created_at) VALUES
+		('p1','d1','已用 30B Model Card 拉起 MIX 服务：JobRun 2edd6e5c33e4baca / Trial 394541347','seed-jobrun:2edd6e5c33e4baca:394541347:ready',?),
+		('p2','d1','已从源评测 fork Arena ddfwxx6xox6a780f81','arena-eval:ddfwxx6xox6a780f81:forked',?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 4`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	demand, err := st.GetDemand(context.Background(), "d1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(demand.Progress) != 2 || len(demand.Progress[0].Links) != 2 || len(demand.Progress[1].Links) != 1 {
+		t.Fatalf("historical progress links were not backfilled: %+v", demand.Progress)
+	}
+	if demand.Progress[0].Links[0].URL == "" || demand.Progress[1].Links[0].Title == "" {
+		t.Fatalf("backfilled links are not directly usable: %+v", demand.Progress)
+	}
+}
+
+func TestDemandProgressPersistsStructuredAndInlineLinks(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	demand, err := st.CreateDemand(ctx, &model.Demand{Title: "验证服务"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress, err := st.AddDemandProgressWithSourceAndLinks(ctx, demand.ID,
+		"JobRun 已启动，日志 https://logs.example.test/run/1。", nil,
+		[]model.ProgressLink{{Kind: "seed-jobrun", Title: "MIX Serving JobRun", URL: "https://jobs.example.test/run/1", DedupeKey: "job:1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(progress.Links) != 2 {
+		t.Fatalf("progress links=%+v, want structured plus inline URL", progress.Links)
+	}
+	loaded, err := st.GetDemand(ctx, demand.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Progress) != 1 || len(loaded.Progress[0].Links) != 2 {
+		t.Fatalf("stored progress links were lost: %+v", loaded.Progress)
+	}
+	if _, err := st.AddDemandProgressWithSourceAndLinks(ctx, demand.ID, "bad link", nil,
+		[]model.ProgressLink{{URL: "javascript:alert(1)"}}); err == nil {
+		t.Fatal("unsafe progress link should be rejected")
 	}
 }
 

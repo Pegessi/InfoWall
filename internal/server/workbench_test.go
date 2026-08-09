@@ -61,13 +61,13 @@ func TestWorkbenchDemandAndProjectAPI(t *testing.T) {
 	requestJSON(t, http.MethodPost, httpSrv.URL+"/api/demands/"+demand.ID+"/progress",
 		map[string]any{"text": "A/B is running", "source": map[string]any{
 			"kind": "feishu-im", "dedupe_key": "chat:c1:m2", "excerpt": "latest update",
-		}}, http.StatusCreated, &progress)
-	if progress.Text != "A/B is running" || progress.DemandID != demand.ID {
+		}, "links": []map[string]any{{"kind": "trial", "title": "Trial 42", "url": "https://example.test/trial/42", "dedupe_key": "trial:42"}}}, http.StatusCreated, &progress)
+	if progress.Text != "A/B is running" || progress.DemandID != demand.ID || len(progress.Links) != 1 {
 		t.Fatalf("unexpected progress: %+v", progress)
 	}
 	assertEvent(t, events, "demand.progress")
 	requestJSON(t, http.MethodGet, httpSrv.URL+"/api/demands/"+demand.ID, nil, http.StatusOK, &demand)
-	if len(demand.Sources) != 2 {
+	if len(demand.Sources) != 2 || len(demand.Progress) != 1 || demand.Progress[0].Links[0].Title != "Trial 42" {
 		t.Fatalf("progress source was not saved atomically: %+v", demand.Sources)
 	}
 

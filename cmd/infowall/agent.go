@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-const agentSpecVersion = "4"
+const agentSpecVersion = "5"
 
 type agentCommandSpec struct {
 	Path        string `json:"path"`
@@ -86,6 +86,12 @@ func buildAgentSpec() agentSpec {
 			"project_status":  {"active", "archived"},
 		},
 		Quality: map[string]any{
+			"progress_links": map[string]any{
+				"rule":        "Every material URL, document, job, trial, evaluation, MR, or message referenced by progress must be included in progress.links as a named direct http(s) link.",
+				"shape":       "[{kind,external_id,title,url,state,dedupe_key}]",
+				"fallback":    "Raw http(s) URLs in progress text are extracted automatically, but structured links are preferred because they preserve a readable title and resource identity.",
+				"idempotency": "Use the resource's stable identity as dedupe_key; repeated progress imports merge previously missing links.",
+			},
 			"automatic_feishu_ingestion": map[string]any{
 				"schedule":        "Asia/Shanghai 09:00-23:00 every 30 minutes, including 23:00",
 				"window":          "last_success_end minus 5 minutes through now; cursors never cross runs",
@@ -122,7 +128,7 @@ func buildAgentSpec() agentSpec {
 			{Path: "demand list [--status STATUS] [--project ID] [--q TEXT] [--include-dismissed] --json", Output: "{demands:[...]}", Notes: "Dismissed demands are hidden unless explicitly requested."},
 			{Path: "demand get ID --json", Output: "demand with sources and progress"},
 			{Path: "demand update ID ... --json", Writes: true, Input: "field flags", Output: "demand", Idempotency: "Setting fields to the same values is safe."},
-			{Path: "demand progress ID --text TEXT [--source JSON] --json", Writes: true, Input: "flags", Output: "progress", Idempotency: "Not retry-safe with source evidence; use demand apply for scanned Feishu evidence."},
+			{Path: "demand progress ID --text TEXT [--link URL ...] [--links JSON|--links-input FILE|-] [--source JSON] --json", Writes: true, Input: "flags; structured links are [{kind,external_id,title,url,state,dedupe_key}]", Output: "progress with named direct links", Idempotency: "Not retry-safe with source evidence; use demand apply for scanned Feishu evidence."},
 			{Path: "project create|list|update|archive ... --json", Writes: true, Input: "flags", Output: "project or {projects:[...]}"},
 			{Path: "sync feishu setup|status|now|disable ... --json", Writes: true, Input: "flags", Output: "Feishu sync state"},
 			{Path: "scan feishu setup|status|now|runs|disable ... --json", Writes: true, Input: "flags; setup accepts one-time --resume-from RFC3339 for an audited prior manual scan", Output: "Feishu ingestion state or run history", Idempotency: "Stable message/source/progress keys make overlapping windows retry-safe."},

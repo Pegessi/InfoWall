@@ -57,6 +57,21 @@ Never derive the dedupe key from a generated title or summary; those can change 
 
 For progress, use a separate stable key `feishu-progress:<message_id>:<demand_id>`. Repeated overlapping windows must reuse it. Never make a retry look new by changing the key.
 
+Every resource materially mentioned by a progress update must also be attached to that progress entry as a named direct link. This includes the originating Feishu message and any document, Wiki, Minutes, Codebase MR, JobRun, Trial, Arena evaluation, Insight, or Model Card used to establish the update. Use `progress[].links` rather than leaving an opaque identifier in prose:
+
+```json
+{
+  "kind": "seed-jobrun",
+  "external_id": "2edd6e5c33e4baca:394541347",
+  "title": "MIX Serving 验收 · JobRun 2edd6e5c33e4baca / Trial 394541347",
+  "url": "https://example.internal/jobrun/2edd6e5c33e4baca?trialId=394541347",
+  "state": "RUNNING",
+  "dedupe_key": "seed-jobrun:2edd6e5c33e4baca:394541347"
+}
+```
+
+The title must tell a human what will open. Do not use a bare ID as the link title. Preserve the canonical URL returned by the source tool, and never invent a URL from an identifier when no canonical route is available.
+
 ## Enrich the candidate before synthesis
 
 An identifier or link locates evidence; it is never the business subject of a demand. After finding a candidate message:
@@ -160,6 +175,15 @@ infowall project list --json
           "id": "feishu-im:om_progress:0",
           "text": "已完成第一轮验证，发现两个待确认问题。",
           "dedupe_key": "feishu-progress:om_progress:EXISTING_DEMAND_ID",
+		  "links": [
+			{
+			  "kind": "feishu-im",
+			  "external_id": "om_progress",
+			  "title": "查看飞书原消息",
+			  "url": "https://example.feishu.cn/client/message/om_progress",
+			  "dedupe_key": "feishu-im:om_progress"
+			}
+		  ],
           "created_at": "2026-08-08T14:20:00+08:00"
         }
       ]

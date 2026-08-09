@@ -158,6 +158,7 @@ func TestAutomaticProgressConfidenceGateAndReviewResolution(t *testing.T) {
 	run, _ := st.StartFeishuIngestionRun(ctx, "manual", end.Add(-time.Hour), end, time.Minute)
 	update := model.DemandProgressUpdate{DemandID: demand.ID, Text: "已完成首轮灰度", DedupeKey: "feishu-progress:om_2:" + demand.ID,
 		Source:     model.Source{Kind: "feishu-im", ExternalID: "om_2", DedupeKey: "feishu-im:om_2:0", Excerpt: "首轮灰度完成"},
+		Links:      []model.ProgressLink{{Kind: "feishu-im", Title: "飞书原消息", URL: "https://example.test/message/om_2", DedupeKey: "feishu-im:om_2"}},
 		Confidence: 0.7, Anchors: []string{"Arnold"}}
 	completed, err := st.CompleteFeishuIngestion(ctx, model.FeishuIngestionCommit{RunID: run.ID, WindowEnd: end,
 		MessagesCandidate: 1, ProcessedMessageIDs: []string{"om_2"}, ProgressUpdates: []model.DemandProgressUpdate{update}})
@@ -176,7 +177,8 @@ func TestAutomaticProgressConfidenceGateAndReviewResolution(t *testing.T) {
 		t.Fatalf("resolve=%+v err=%v", resolved, err)
 	}
 	updatedDemand, _ := st.GetDemand(ctx, demand.ID)
-	if len(updatedDemand.Progress) != 1 || updatedDemand.Progress[0].DedupeKey != update.DedupeKey || len(updatedDemand.Sources) != 2 {
+	if len(updatedDemand.Progress) != 1 || updatedDemand.Progress[0].DedupeKey != update.DedupeKey ||
+		len(updatedDemand.Progress[0].Links) != 1 || len(updatedDemand.Sources) != 2 {
 		t.Fatalf("review evidence/progress was not atomically appended: %+v", updatedDemand)
 	}
 }

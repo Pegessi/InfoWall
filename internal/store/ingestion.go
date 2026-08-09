@@ -430,6 +430,7 @@ func (s *Store) CompleteFeishuIngestion(ctx context.Context, commit model.Feishu
 func applyAutomaticProgressTx(ctx context.Context, tx *sql.Tx, update model.DemandProgressUpdate) (string, *model.DemandReview, error) {
 	update.Text = strings.TrimSpace(update.Text)
 	update.DedupeKey = strings.TrimSpace(update.DedupeKey)
+	update.Links = progressLinksWithSource(update.Links, &update.Source)
 	if update.DemandID == "" || update.Text == "" || update.DedupeKey == "" {
 		return "", nil, errors.New("automatic progress requires demand_id, text and dedupe_key")
 	}
@@ -440,11 +441,23 @@ func applyAutomaticProgressTx(ctx context.Context, tx *sql.Tx, update model.Dema
 		}
 		return "", nil, err
 	}
-	var duplicate int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM demand_progress WHERE dedupe_key = ?`, update.DedupeKey).Scan(&duplicate); err != nil {
-		return "", nil, err
+	var duplicateID string
+	duplicateErr := tx.QueryRowContext(ctx, `SELECT id FROM demand_progress WHERE dedupe_key = ?`, update.DedupeKey).Scan(&duplicateID)
+	if duplicateErr != nil && duplicateErr != sql.ErrNoRows {
+		return "", nil, duplicateErr
 	}
-	if duplicate > 0 {
+	if duplicateID != "" {
+		links, err := normalizeProgressLinks(update.Links, update.Text)
+		if err != nil {
+			return "", nil, err
+		}
+		changed, err := insertProgressLinksTx(ctx, tx, duplicateID, links)
+		if err != nil {
+			return "", nil, err
+		}
+		if changed {
+			return "updated", nil, nil
+		}
 		return "skipped", nil, nil
 	}
 	anchorCount := len(normalizeStrings(update.Anchors))
@@ -455,13 +468,13 @@ func applyAutomaticProgressTx(ctx context.Context, tx *sql.Tx, update model.Dema
 	if update.Confidence < 0.9 || (!sourceMatch && anchorCount < 2) {
 		review := &model.DemandReview{Kind: "progress", SuggestedDemandID: update.DemandID,
 			ProgressText: update.Text, Source: update.Source, ProgressDedupeKey: update.DedupeKey,
-			Confidence: update.Confidence, Rationale: "automatic match did not meet the service-side confidence anchors"}
+			Links: update.Links, Confidence: update.Confidence,
+			Rationale: "automatic match did not meet the service-side confidence anchors"}
 		return "review", review, nil
 	}
 	progress := model.Progress{ID: uuid.NewString(), DemandID: update.DemandID, Text: update.Text,
-		DedupeKey: update.DedupeKey, CreatedAt: time.Now().UTC()}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO demand_progress (id, demand_id, text, dedupe_key, created_at)
-		VALUES (?, ?, ?, ?, ?)`, progress.ID, progress.DemandID, progress.Text, progress.DedupeKey, progress.CreatedAt); err != nil {
+		DedupeKey: update.DedupeKey, Links: update.Links, CreatedAt: time.Now().UTC()}
+	if err := insertProgressTx(ctx, tx, &progress); err != nil {
 		if isUniqueConstraint(err) {
 			return "skipped", nil, nil
 		}
@@ -507,7 +520,13 @@ func insertDemandReviewTx(ctx context.Context, tx *sql.Tx, review *model.DemandR
 		review.CreatedAt = now
 	}
 	review.UpdatedAt = now
-	raw, err := json.Marshal(review.Source)
+	review.Links = progressLinksWithSource(review.Links, &review.Source)
+	links, err := normalizeProgressLinks(review.Links, review.ProgressText)
+	if err != nil {
+		return false, err
+	}
+	review.Links = links
+	raw, err := json.Marshal(demandReviewEvidence{Source: review.Source, Links: review.Links})
 	if err != nil {
 		return false, err
 	}
@@ -627,8 +646,15 @@ func scanDemandReview(scan func(...any) error) (*model.DemandReview, error) {
 	if suggested.Valid {
 		review.SuggestedDemandID = suggested.String
 	}
-	if err := json.Unmarshal([]byte(sourceRaw), &review.Source); err != nil {
+	var evidence demandReviewEvidence
+	if err := json.Unmarshal([]byte(sourceRaw), &evidence); err == nil && evidence.Source.Kind != "" {
+		review.Source = evidence.Source
+		review.Links = evidence.Links
+	} else if err := json.Unmarshal([]byte(sourceRaw), &review.Source); err != nil {
 		return nil, fmt.Errorf("decode review source: %w", err)
+	}
+	if review.Links == nil {
+		review.Links = []model.ProgressLink{}
 	}
 	review.CreatedAt = parseSQLiteTime(createdRaw)
 	review.UpdatedAt = parseSQLiteTime(updatedRaw)
@@ -671,9 +697,10 @@ func (s *Store) ResolveDemandReview(ctx context.Context, id, action, demandID st
 			}
 			return nil, err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO demand_progress
-			(id, demand_id, text, dedupe_key, created_at) VALUES (?, ?, ?, ?, ?)`,
-			uuid.NewString(), demandID, review.ProgressText, review.ProgressDedupeKey, now)
+		progress := model.Progress{ID: uuid.NewString(), DemandID: demandID,
+			Text: review.ProgressText, DedupeKey: review.ProgressDedupeKey,
+			Links: review.Links, CreatedAt: now}
+		err := insertProgressTx(ctx, tx, &progress)
 		if err != nil && !isUniqueConstraint(err) {
 			return nil, err
 		}
@@ -708,4 +735,9 @@ func (s *Store) ResolveDemandReview(ctx context.Context, id, action, demandID st
 	review.UpdatedAt = now
 	review.ResolvedAt = &now
 	return review, nil
+}
+
+type demandReviewEvidence struct {
+	Source model.Source         `json:"source"`
+	Links  []model.ProgressLink `json:"links,omitempty"`
 }

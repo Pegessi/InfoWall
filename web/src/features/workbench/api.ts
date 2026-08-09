@@ -3,6 +3,7 @@ import type {
   DemandPatch,
   DemandPriority,
   DemandProgress,
+  DemandProgressLink,
   DemandSource,
   DemandStatus,
   FeishuDocIntegration,
@@ -61,6 +62,49 @@ function normalizeProgress(value: unknown): DemandProgress[] {
       id: String(row.id ?? crypto.randomUUID()),
       text: String(row.text ?? row.body ?? ""),
       createdAt: stringValue(row, "createdAt", "created_at") ?? new Date().toISOString(),
+      links: normalizeProgressLinks(row.links),
+    }];
+  });
+}
+
+function progressLinkFallbackTitle(kind: string, externalId?: string, url?: string): string {
+  const labels: Record<string, string> = {
+    "feishu-im": "飞书原消息",
+    "feishu-doc": "飞书文档",
+    "feishu-wiki": "飞书 Wiki",
+    "feishu-minutes": "飞书妙记",
+    "codebase-mr": "Codebase MR",
+    "seed-jobrun": "JobRun",
+    "trial": "Trial",
+    "arena-eval": "Arena 评测",
+    "model-card": "Model Card",
+    insight: "Insight",
+  };
+  const label = labels[kind] ?? "相关链接";
+  if (externalId) return `${label} · ${externalId}`;
+  try {
+    return kind === "link" && url ? new URL(url).hostname : label;
+  } catch {
+    return label;
+  }
+}
+
+export function normalizeProgressLinks(value: unknown): DemandProgressLink[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const row = entry as JsonRecord;
+    const url = stringValue(row, "url");
+    if (!url) return [];
+    const kind = String(row.kind ?? "link");
+    const externalId = stringValue(row, "externalId", "external_id");
+    return [{
+      kind,
+      externalId,
+      title: stringValue(row, "title") ?? progressLinkFallbackTitle(kind, externalId, url),
+      url,
+      state: stringValue(row, "state"),
+      dedupeKey: stringValue(row, "dedupeKey", "dedupe_key"),
     }];
   });
 }
@@ -162,10 +206,17 @@ export async function createDemand(patch: DemandPatch & { title: string }): Prom
   return normalizeDemand(row);
 }
 
-export async function appendDemandProgress(id: string, text: string): Promise<void> {
+export async function appendDemandProgress(id: string, text: string, links: DemandProgressLink[] = []): Promise<void> {
   await request<unknown>(`/api/demands/${encodeURIComponent(id)}/progress`, {
     method: "POST",
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, links: links.map((link) => ({
+      kind: link.kind,
+      external_id: link.externalId,
+      title: link.title,
+      url: link.url,
+      state: link.state,
+      dedupe_key: link.dedupeKey,
+    })) }),
   });
 }
 
@@ -261,6 +312,7 @@ export async function fetchDemandReviews(): Promise<DemandReview[]> {
     suggestedDemandId: stringValue(row, "suggestedDemandId", "suggested_demand_id"),
     progressText: String(row.progress_text ?? ""), progressDedupeKey: String(row.progress_dedupe_key ?? ""),
     source: normalizeSources([row.source])[0] ?? { kind: "feishu-im", label: "来源记录" },
+    links: normalizeProgressLinks(row.links),
     confidence: Number(row.confidence ?? 0), rationale: stringValue(row, "rationale"),
     createdAt: String(row.created_at ?? ""),
   }));

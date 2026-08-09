@@ -26,7 +26,7 @@ type Store struct {
 // introduced report user_version = 0 and are structurally identical to v1, so
 // migrating 0 -> 1 only stamps the version (no data change). Bump this and add a
 // case in migrate() when the schema changes in a future release.
-const schemaVersion = 4
+const schemaVersion = 5
 
 const schema = `
 CREATE TABLE IF NOT EXISTS items (
@@ -306,6 +306,13 @@ func migrateStep(db *sql.DB, from int) error {
 		// ambiguous-progress review items, and retry-safe progress keys.
 		if _, err := db.Exec(feishuIngestionSchema); err != nil {
 			return fmt.Errorf("apply Feishu ingestion schema: %w", err)
+		}
+		return nil
+	case 4:
+		// 4 -> 5: store named, directly navigable resources on individual
+		// progress entries and backfill them from existing evidence URLs.
+		if err := migrateProgressLinks(db); err != nil {
+			return fmt.Errorf("apply demand progress links schema: %w", err)
 		}
 		return nil
 	default:

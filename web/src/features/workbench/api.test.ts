@@ -15,6 +15,12 @@ describe("normalizeDemand", () => {
       next_action: "完成 review 并合入 develop",
       created_at: "2026-08-09T09:00:00+08:00",
       updated_at: "2026-08-09T10:00:00+08:00",
+      progress: [{
+        id: "progress-1",
+        text: "Trial 已启动",
+        created_at: "2026-08-09T09:30:00+08:00",
+        links: [{ kind: "trial", external_id: "394541347", title: "MIX 验收 Trial 394541347", url: "https://example.test/trial/394541347", state: "RUNNING", dedupe_key: "trial:394541347" }],
+      }],
       sources: [
         {
           id: "source-1",
@@ -44,6 +50,9 @@ describe("normalizeDemand", () => {
 
     expect(demand.projectHint).toBe("xperf_evo");
     expect(demand.nextStep).toBe("完成 review 并合入 develop");
+    expect(demand.progress[0].links[0]).toEqual(expect.objectContaining({
+      externalId: "394541347", title: "MIX 验收 Trial 394541347", state: "RUNNING", dedupeKey: "trial:394541347",
+    }));
     expect(demand.sources[0]).toEqual(expect.objectContaining({
       kind: "feishu-im",
       label: "这个 MR 是部署规划阶段自动推导 serving topology",
@@ -89,7 +98,7 @@ describe("automatic ingestion normalization", () => {
     const responses = [
       { enabled: true, timezone: "Asia/Shanghai", active_start: "09:00", active_end: "23:00", interval_minutes: 30, overlap_minutes: 5, excluded_chat_ids: ["oc_skip"], last_success_end: "2026-08-09T10:00:00Z", next_run_at: "2026-08-09T10:30:00Z", status: "idle" },
       { runs: [{ id: "run-1", trigger: "manual", status: "success", window_start: "2026-08-09T09:55:00Z", window_end: "2026-08-09T10:00:00Z", messages_seen: 4, messages_candidate: 1, created: 1, updated: 0, skipped: 3, review_count: 0, input_tokens: 1234, cached_input_tokens: 1000, output_tokens: 120, started_at: "2026-08-09T10:00:00Z" }] },
-      { reviews: [{ id: "review-1", status: "pending", suggested_demand_id: "demand-1", progress_text: "完成灰度", progress_dedupe_key: "feishu-progress:om_1:demand-1", confidence: 0.7, created_at: "2026-08-09T10:00:00Z", source: { kind: "feishu-im", external_id: "om_1", sender_name: "请求人", excerpt: "完成灰度" } }] },
+      { reviews: [{ id: "review-1", status: "pending", suggested_demand_id: "demand-1", progress_text: "完成灰度", progress_dedupe_key: "feishu-progress:om_1:demand-1", confidence: 0.7, created_at: "2026-08-09T10:00:00Z", source: { kind: "feishu-im", external_id: "om_1", sender_name: "请求人", excerpt: "完成灰度" }, links: [{ kind: "feishu-im", title: "飞书原消息", url: "https://example.test/message/om_1" }] }] },
     ];
     vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => ({ ok: true, json: async () => responses.shift() })));
     const state = await fetchFeishuChatIntegration();
@@ -99,5 +108,6 @@ describe("automatic ingestion normalization", () => {
     expect(runs[0]).toEqual(expect.objectContaining({ messagesCandidate: 1, inputTokens: 1234, outputTokens: 120 }));
     expect(reviews[0]).toEqual(expect.objectContaining({ suggestedDemandId: "demand-1", progressText: "完成灰度" }));
     expect(reviews[0].source).toEqual(expect.objectContaining({ externalId: "om_1", senderName: "请求人", excerpt: "完成灰度" }));
+    expect(reviews[0].links[0]).toEqual(expect.objectContaining({ title: "飞书原消息", url: "https://example.test/message/om_1" }));
   });
 });

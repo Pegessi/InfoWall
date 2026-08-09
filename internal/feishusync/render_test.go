@@ -14,11 +14,13 @@ func TestRenderSectionsAndEscaping(t *testing.T) {
 		Projects:  []ProjectView{{ID: "p1", Name: "同步 & 工作台"}},
 		Demands: []DemandView{
 			{ID: "d1", Title: "确认 <需求>", Status: "pending", Priority: "p0", UpdatedAt: now},
-			{ID: "d2", Title: "实现同步", Status: "active", Priority: "p1", ProjectID: "p1", LatestProgress: "完成 50%", UpdatedAt: now, SourceURL: "https://example.com/?a=1&b=2"},
+			{ID: "d2", Title: "实现同步", Status: "active", Priority: "p1", ProjectID: "p1", LatestProgress: "完成 50%",
+				ProgressLinks: []ProgressLinkView{{Title: "Trial 42", URL: "https://example.com/trial?a=1&b=2", State: "RUNNING"}},
+				UpdatedAt:     now, SourceURL: "https://example.com/?a=1&b=2"},
 			{ID: "d3", Title: "已完成", Status: "done", Priority: "p2", UpdatedAt: now},
 		},
 	})
-	for _, want := range []string{ManagedHeading, "待确认需求", "按项目", "未分类需求", "最近 30 天完成", "同步 &amp; 工作台", "确认 &lt;需求&gt;", EndMarkerPrefix + rendered.Hash} {
+	for _, want := range []string{ManagedHeading, "待确认需求", "按项目", "未分类需求", "最近 30 天完成", "同步 &amp; 工作台", "确认 &lt;需求&gt;", "Trial 42（RUNNING）", EndMarkerPrefix + rendered.Hash} {
 		if !strings.Contains(rendered.ManagedXML, want) {
 			t.Fatalf("rendered XML missing %q:\n%s", want, rendered.ManagedXML)
 		}

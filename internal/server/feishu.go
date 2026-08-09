@@ -66,7 +66,13 @@ func (b *feishuBackend) Snapshot(ctx context.Context) (feishusync.Snapshot, erro
 			view.ProjectID = *demand.ProjectID
 		}
 		if len(demand.Progress) > 0 {
-			view.LatestProgress = demand.Progress[len(demand.Progress)-1].Text
+			latest := demand.Progress[len(demand.Progress)-1]
+			view.LatestProgress = latest.Text
+			for _, link := range latest.Links {
+				view.ProgressLinks = append(view.ProgressLinks, feishusync.ProgressLinkView{
+					Title: link.Title, URL: link.URL, State: link.State,
+				})
+			}
 		}
 		for i := len(demand.Sources) - 1; i >= 0; i-- {
 			if demand.Sources[i].URL != "" {

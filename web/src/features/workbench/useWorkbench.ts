@@ -18,7 +18,7 @@ import {
   updateDemand as apiUpdateDemand,
   updateProject as apiUpdateProject,
 } from "./api";
-import type { Demand, DemandPatch, DemandReview, DemandStatus, FeishuChatIntegration, FeishuDocIntegration, FeishuIngestionRun, Project } from "./model";
+import type { Demand, DemandPatch, DemandProgressLink, DemandReview, DemandStatus, FeishuChatIntegration, FeishuDocIntegration, FeishuIngestionRun, Project } from "./model";
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : "请求失败，请稍后重试";
@@ -108,7 +108,7 @@ export function useWorkbench() {
     confirmDemand: (id: string, status: Extract<DemandStatus, "planned" | "active">, patch: DemandPatch) =>
       mutate(() => apiUpdateDemand(id, { ...patch, status })),
     dismissDemand: (id: string) => mutate(() => apiUpdateDemand(id, { status: "dismissed" })),
-    addProgress: (id: string, text: string) => mutate(() => appendDemandProgress(id, text)),
+    addProgress: (id: string, text: string, links?: DemandProgressLink[]) => mutate(() => appendDemandProgress(id, text, links)),
     syncFeishu: () => mutate(syncFeishuIntegration),
     scanFeishu: () => mutate(scanFeishuNow),
     acceptReview: (id: string, demandId?: string) => mutate(() => acceptDemandReview(id, demandId)),

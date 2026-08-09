@@ -60,11 +60,24 @@ type Source struct {
 }
 
 type Progress struct {
-	ID        string    `json:"id"`
-	DemandID  string    `json:"demand_id,omitempty"`
-	Text      string    `json:"text"`
-	DedupeKey string    `json:"dedupe_key,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string         `json:"id"`
+	DemandID  string         `json:"demand_id,omitempty"`
+	Text      string         `json:"text"`
+	DedupeKey string         `json:"dedupe_key,omitempty"`
+	Links     []ProgressLink `json:"links"`
+	CreatedAt time.Time      `json:"created_at"`
+}
+
+// ProgressLink keeps a resource mentioned by a progress entry independently
+// addressable. The progress text remains readable prose while clients can use
+// these fields to render a direct, named jump to the underlying evidence.
+type ProgressLink struct {
+	Kind       string `json:"kind"`
+	ExternalID string `json:"external_id,omitempty"`
+	Title      string `json:"title,omitempty"`
+	URL        string `json:"url"`
+	State      string `json:"state,omitempty"`
+	DedupeKey  string `json:"dedupe_key,omitempty"`
 }
 
 type Demand struct {
@@ -163,29 +176,31 @@ type FeishuIngestionRun struct {
 }
 
 type DemandReview struct {
-	ID                string     `json:"id"`
-	Kind              string     `json:"kind"`
-	Status            string     `json:"status"`
-	SuggestedDemandID string     `json:"suggested_demand_id,omitempty"`
-	ProgressText      string     `json:"progress_text"`
-	Source            Source     `json:"source"`
-	ProgressDedupeKey string     `json:"progress_dedupe_key"`
-	Confidence        float64    `json:"confidence"`
-	Rationale         string     `json:"rationale,omitempty"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
-	ResolvedAt        *time.Time `json:"resolved_at"`
+	ID                string         `json:"id"`
+	Kind              string         `json:"kind"`
+	Status            string         `json:"status"`
+	SuggestedDemandID string         `json:"suggested_demand_id,omitempty"`
+	ProgressText      string         `json:"progress_text"`
+	Source            Source         `json:"source"`
+	Links             []ProgressLink `json:"links,omitempty"`
+	ProgressDedupeKey string         `json:"progress_dedupe_key"`
+	Confidence        float64        `json:"confidence"`
+	Rationale         string         `json:"rationale,omitempty"`
+	CreatedAt         time.Time      `json:"created_at"`
+	UpdatedAt         time.Time      `json:"updated_at"`
+	ResolvedAt        *time.Time     `json:"resolved_at"`
 }
 
 // DemandProgressUpdate is an ingestion-only append. Automated collection must
 // never rewrite the matched demand's user-managed fields.
 type DemandProgressUpdate struct {
-	DemandID   string   `json:"demand_id"`
-	Text       string   `json:"text"`
-	DedupeKey  string   `json:"dedupe_key"`
-	Source     Source   `json:"source"`
-	Confidence float64  `json:"confidence"`
-	Anchors    []string `json:"anchors,omitempty"`
+	DemandID   string         `json:"demand_id"`
+	Text       string         `json:"text"`
+	DedupeKey  string         `json:"dedupe_key"`
+	Source     Source         `json:"source"`
+	Links      []ProgressLink `json:"links,omitempty"`
+	Confidence float64        `json:"confidence"`
+	Anchors    []string       `json:"anchors,omitempty"`
 }
 
 type FeishuIngestionCommit struct {

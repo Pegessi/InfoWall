@@ -51,7 +51,12 @@ truth; the browser and CLI both update it through the local API:
 ./bin/infowall project create --name "InfoWall" --json
 ./bin/infowall demand create --title "完善个人需求工作台" \
   --status pending --priority p1 --project-hint "InfoWall" --json
-./bin/infowall demand progress DEMAND_ID --text "已完成第一轮联调" --json
+./bin/infowall demand progress DEMAND_ID --text "已完成第一轮联调" \
+  --link "https://example.test/jobrun/123" --json
+
+# Named resource links can carry type, title, state, and a stable identity.
+./bin/infowall demand progress DEMAND_ID --text "Trial 已进入 RUNNING" \
+  --links '[{"kind":"trial","external_id":"394541347","title":"MIX 验收 Trial 394541347","url":"https://example.test/trial/394541347","state":"RUNNING","dedupe_key":"trial:394541347"}]' --json
 
 # Create the one-way Feishu mirror, or bind an existing document URL.
 ./bin/infowall sync feishu setup --create --json
