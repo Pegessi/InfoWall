@@ -54,7 +54,8 @@ func TestAgentSpecJSONIsMachineDiscoverable(t *testing.T) {
 		t.Fatalf("missing automatic ingestion contract: %+v", spec.Quality)
 	}
 	if !strings.Contains(autoQuality["self_relevance"].(string), "before Codex") ||
-		!strings.Contains(autoQuality["identity"].(string), "open_id") {
+		!strings.Contains(autoQuality["identity"].(string), "open_id") ||
+		!strings.Contains(autoQuality["identity"].(string), "needs_refresh") {
 		t.Fatalf("missing self-relevance gate: %+v", autoQuality)
 	}
 	linkQuality, ok := spec.Quality["progress_links"].(map[string]any)

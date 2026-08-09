@@ -157,7 +157,11 @@ func (c LarkCollector) resolveSelfIdentity(ctx context.Context) (selfIdentity, e
 		return selfIdentity{}, fmt.Errorf("decode current Feishu user: %w", err)
 	}
 	user := status.Identities.User
-	if !user.Available || strings.ToLower(strings.TrimSpace(user.Status)) != "ready" || strings.TrimSpace(user.OpenID) == "" {
+	// needs_refresh is a usable user identity: lark-cli refreshes its token on
+	// the following user API call. Treat availability plus a stable open_id as
+	// the identity contract and let the actual search surface refresh/auth
+	// failures without advancing the ingestion watermark.
+	if !user.Available || strings.TrimSpace(user.OpenID) == "" {
 		return selfIdentity{}, errors.New("current Feishu user identity is unavailable; group ingestion is fail-closed")
 	}
 	return selfIdentity{OpenID: strings.TrimSpace(user.OpenID), Name: strings.TrimSpace(user.UserName)}, nil

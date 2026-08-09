@@ -133,14 +133,36 @@ func TestLarkCollectorResolvesCurrentUserBeforeSearch(t *testing.T) {
 	}
 }
 
-func TestLarkCollectorFailsClosedWhenCurrentUserCannotBeResolved(t *testing.T) {
-	runner := &sequenceCommandRunner{outputs: [][]byte{[]byte(`{"identities":{"user":{"status":"missing","available":false}}}`)}}
-	_, err := (LarkCollector{Runner: runner}).Collect(context.Background(), time.Now().Add(-time.Hour), time.Now(), nil)
-	if err == nil || !strings.Contains(err.Error(), "fail-closed") {
-		t.Fatalf("missing identity should fail closed, got %v", err)
+func TestLarkCollectorAllowsRefreshableCurrentUser(t *testing.T) {
+	runner := &sequenceCommandRunner{outputs: [][]byte{
+		[]byte(`{"identities":{"user":{"status":"needs_refresh","available":true,"openId":"ou_me","userName":"当前用户","tokenStatus":"needs_refresh"}}}`),
+		[]byte(`{"ok":true,"data":{"has_more":false,"page_token":"","total":1,"messages":[{"message_id":"mine","chat_id":"group","chat_type":"group","content":"我来推进","create_time":"2026-08-09 10:30","sender":{"id":"ou_me","name":"当前用户","sender_type":"user"}}]}}`),
+	}}
+	result, err := (LarkCollector{Runner: runner}).Collect(context.Background(), time.Now().Add(-time.Hour), time.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(runner.args) != 1 {
-		t.Fatalf("message search ran without a known current user: %+v", runner.args)
+	if len(runner.args) != 2 || !strings.Contains(strings.Join(runner.args[1], " "), "im +messages-search") {
+		t.Fatalf("refreshable identity did not reach the user API: %+v", runner.args)
+	}
+	if len(result.Candidates) != 1 || result.Candidates[0].ID != "mine" {
+		t.Fatalf("refreshable self identity was not applied: %+v", result)
+	}
+}
+
+func TestLarkCollectorFailsClosedWhenCurrentUserCannotBeResolved(t *testing.T) {
+	for _, authStatus := range []string{
+		`{"identities":{"user":{"status":"missing","available":false,"openId":"ou_me"}}}`,
+		`{"identities":{"user":{"status":"ready","available":true}}}`,
+	} {
+		runner := &sequenceCommandRunner{outputs: [][]byte{[]byte(authStatus)}}
+		_, err := (LarkCollector{Runner: runner}).Collect(context.Background(), time.Now().Add(-time.Hour), time.Now(), nil)
+		if err == nil || !strings.Contains(err.Error(), "fail-closed") {
+			t.Fatalf("unavailable identity should fail closed, got %v", err)
+		}
+		if len(runner.args) != 1 {
+			t.Fatalf("message search ran without a usable current user: %+v", runner.args)
+		}
 	}
 }
 

@@ -17,6 +17,8 @@ The automatic schedule is Asia/Shanghai 09:00–23:00 every 30 minutes, includin
 
 Automatic ingestion has a server-enforced current-user relevance gate before Codex is started. Direct chats remain eligible. In group and topic chats, only messages authored by the authenticated user, explicitly @mentioning that user, or belonging to a thread in which that user participated may be candidate messages. Treat any unrelated group chatter that somehow appears in the input as `skipped`; never create or update a demand from it. Do not infer relevance from a shared team, a broad project keyword, `@all`, or mere presence in the same group.
 
+The collector resolves the current user through `lark-cli auth status --json`. A user identity with `available=true` and a non-empty `openId` is usable in both `ready` and `needs_refresh` states; the following user API call performs the token refresh. Fail closed only when the identity is unavailable or lacks an open ID, and never advance the watermark after a real refresh/auth failure.
+
 ## Collect the bounded window
 
 1. Default to Monday 00:00:00 of the current calendar week through now in UTC+08:00. Honor an explicitly requested window instead.
