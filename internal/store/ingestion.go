@@ -219,7 +219,7 @@ func (s *Store) StartFeishuIngestionRun(ctx context.Context, trigger string, sta
 	return run, nil
 }
 
-func (s *Store) FailFeishuIngestionRun(ctx context.Context, runID, message string, seen, candidates int) error {
+func (s *Store) FailFeishuIngestionRun(ctx context.Context, runID, message string, seen, candidates int, inputTokens, cachedInputTokens, outputTokens int64) error {
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -227,8 +227,9 @@ func (s *Store) FailFeishuIngestionRun(ctx context.Context, runID, message strin
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `UPDATE feishu_ingestion_runs SET status = 'error',
-		messages_seen = ?, messages_candidate = ?, error = ?, finished_at = ? WHERE id = ?`,
-		seen, candidates, truncateError(message), now, runID); err != nil {
+		messages_seen = ?, messages_candidate = ?, input_tokens = ?, cached_input_tokens = ?, output_tokens = ?,
+		error = ?, finished_at = ? WHERE id = ?`, seen, candidates, inputTokens, cachedInputTokens, outputTokens,
+		truncateError(message), now, runID); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE feishu_ingestion_state SET

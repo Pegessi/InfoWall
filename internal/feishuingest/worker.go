@@ -15,7 +15,7 @@ type Backend interface {
 	SetFeishuIngestionNextRun(context.Context, time.Time) error
 	StartFeishuIngestionRun(context.Context, string, time.Time, time.Time, time.Duration) (*model.FeishuIngestionRun, error)
 	RenewFeishuIngestionLease(context.Context, string, time.Duration) error
-	FailFeishuIngestionRun(context.Context, string, string, int, int) error
+	FailFeishuIngestionRun(context.Context, string, string, int, int, int64, int64, int64) error
 	CompleteFeishuIngestion(context.Context, model.FeishuIngestionCommit) (*model.FeishuIngestionRun, error)
 	FilterNewFeishuMessageIDs(context.Context, []string) (map[string]bool, error)
 	IngestionSnapshot(context.Context) (Snapshot, error)
@@ -113,7 +113,7 @@ func (w *Worker) runWindow(ctx context.Context, trigger string, start, end time.
 	w.updated()
 	collection, err := w.Collector.Collect(ctx, start, end, excluded)
 	if err != nil {
-		_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, err.Error(), 0, 0)
+		_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, err.Error(), 0, 0, 0, 0, 0)
 		return err
 	}
 	ids := make([]string, 0, len(collection.Candidates))
@@ -122,7 +122,7 @@ func (w *Worker) runWindow(ctx context.Context, trigger string, start, end time.
 	}
 	newIDs, err := w.Backend.FilterNewFeishuMessageIDs(ctx, ids)
 	if err != nil {
-		_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, err.Error(), collection.Seen, 0)
+		_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, err.Error(), collection.Seen, 0, 0, 0, 0)
 		return err
 	}
 	newCandidates := make([]Message, 0, len(collection.Candidates))
@@ -140,7 +140,7 @@ func (w *Worker) runWindow(ctx context.Context, trigger string, start, end time.
 	}
 	snapshot, err := w.Backend.IngestionSnapshot(ctx)
 	if err != nil {
-		_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, err.Error(), collection.Seen, len(newCandidates))
+		_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, err.Error(), collection.Seen, len(newCandidates), 0, 0, 0)
 		return err
 	}
 	resources := []Resource{}
@@ -151,15 +151,17 @@ func (w *Worker) runWindow(ctx context.Context, trigger string, start, end time.
 	var result Result
 	for _, request := range chunkAnalysisBatches(batches, 40) {
 		if err := w.Backend.RenewFeishuIngestionLease(ctx, run.ID, 20*time.Minute); err != nil {
-			_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, err.Error(), collection.Seen, len(newCandidates))
+			_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, err.Error(), collection.Seen, len(newCandidates),
+				result.InputTokens, result.CachedInputTokens, result.OutputTokens)
 			return err
 		}
 		partial, analyzeErr := w.Analyzer.Analyze(ctx, request)
+		mergeAnalysisResult(&result, partial)
 		if analyzeErr != nil {
-			_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, analyzeErr.Error(), collection.Seen, len(newCandidates))
+			_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, analyzeErr.Error(), collection.Seen, len(newCandidates),
+				result.InputTokens, result.CachedInputTokens, result.OutputTokens)
 			return analyzeErr
 		}
-		mergeAnalysisResult(&result, partial)
 	}
 	commit.InputTokens = result.InputTokens
 	commit.CachedInputTokens = result.CachedInputTokens

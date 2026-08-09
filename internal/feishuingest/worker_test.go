@@ -51,7 +51,7 @@ func (backend *fakeBackend) RenewFeishuIngestionLease(context.Context, string, t
 	backend.renewed++
 	return nil
 }
-func (backend *fakeBackend) FailFeishuIngestionRun(context.Context, string, string, int, int) error {
+func (backend *fakeBackend) FailFeishuIngestionRun(context.Context, string, string, int, int, int64, int64, int64) error {
 	backend.failed++
 	return nil
 }

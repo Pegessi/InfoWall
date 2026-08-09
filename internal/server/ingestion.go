@@ -33,8 +33,8 @@ func (b *ingestionBackend) RenewFeishuIngestionLease(ctx context.Context, runID 
 	return b.store.RenewFeishuIngestionLease(ctx, runID, lease)
 }
 
-func (b *ingestionBackend) FailFeishuIngestionRun(ctx context.Context, runID, message string, seen, candidates int) error {
-	return b.store.FailFeishuIngestionRun(ctx, runID, message, seen, candidates)
+func (b *ingestionBackend) FailFeishuIngestionRun(ctx context.Context, runID, message string, seen, candidates int, inputTokens, cachedInputTokens, outputTokens int64) error {
+	return b.store.FailFeishuIngestionRun(ctx, runID, message, seen, candidates, inputTokens, cachedInputTokens, outputTokens)
 }
 
 func (b *ingestionBackend) CompleteFeishuIngestion(ctx context.Context, commit model.FeishuIngestionCommit) (*model.FeishuIngestionRun, error) {

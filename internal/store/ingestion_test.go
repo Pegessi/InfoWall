@@ -133,12 +133,16 @@ func TestFeishuIngestionLeaseRenewalAndDisabledFailureState(t *testing.T) {
 	if _, err := st.ConfigureFeishuIngestion(ctx, state, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.FailFeishuIngestionRun(ctx, run.ID, "cancelled while disabled", 1, 1); err != nil {
+	if err := st.FailFeishuIngestionRun(ctx, run.ID, "cancelled while disabled", 1, 1, 123, 100, 7); err != nil {
 		t.Fatal(err)
 	}
 	disabled, err := st.GetFeishuIngestionState(ctx)
 	if err != nil || disabled.Status != "disabled" || disabled.CurrentRunID != "" {
 		t.Fatalf("disabled failure state = %+v err=%v", disabled, err)
+	}
+	runs, err := st.ListFeishuIngestionRuns(ctx, 1)
+	if err != nil || len(runs) != 1 || runs[0].InputTokens != 123 || runs[0].CachedInputTokens != 100 || runs[0].OutputTokens != 7 {
+		t.Fatalf("failed run usage = %+v err=%v", runs, err)
 	}
 }
 
