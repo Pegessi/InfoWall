@@ -56,30 +56,38 @@ type AnalysisInput struct {
 	Resources   []Resource `json:"linked_resources"`
 }
 
+// EvidenceRef is the only source shape the model may return. InfoWall owns all
+// canonical metadata (sender, chat, timestamp, URL and dedupe key) and resolves
+// it from the referenced collected message after strict validation.
+type EvidenceRef struct {
+	ExternalID string `json:"external_id"`
+	Excerpt    string `json:"excerpt"`
+}
+
 type NewDemand struct {
-	Title       string         `json:"title"`
-	Description string         `json:"description"`
-	NextAction  string         `json:"next_action"`
-	ProjectHint string         `json:"project_hint"`
-	Sources     []model.Source `json:"sources"`
+	Title       string        `json:"title"`
+	Description string        `json:"description"`
+	NextAction  string        `json:"next_action"`
+	ProjectHint string        `json:"project_hint"`
+	Sources     []EvidenceRef `json:"sources"`
 }
 
 type ProgressUpdate struct {
-	DemandID   string       `json:"demand_id"`
-	Text       string       `json:"text"`
-	DedupeKey  string       `json:"dedupe_key"`
-	Source     model.Source `json:"source"`
-	Confidence float64      `json:"confidence"`
-	Anchors    []string     `json:"anchors"`
+	DemandID   string      `json:"demand_id"`
+	Text       string      `json:"text"`
+	DedupeKey  string      `json:"dedupe_key"`
+	Source     EvidenceRef `json:"source"`
+	Confidence float64     `json:"confidence"`
+	Anchors    []string    `json:"anchors"`
 }
 
 type Review struct {
-	SuggestedDemandID string       `json:"suggested_demand_id"`
-	ProgressText      string       `json:"progress_text"`
-	ProgressDedupeKey string       `json:"progress_dedupe_key"`
-	Source            model.Source `json:"source"`
-	Confidence        float64      `json:"confidence"`
-	Rationale         string       `json:"rationale"`
+	SuggestedDemandID string      `json:"suggested_demand_id"`
+	ProgressText      string      `json:"progress_text"`
+	ProgressDedupeKey string      `json:"progress_dedupe_key"`
+	Source            EvidenceRef `json:"source"`
+	Confidence        float64     `json:"confidence"`
+	Rationale         string      `json:"rationale"`
 }
 
 type Result struct {

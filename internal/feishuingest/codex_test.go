@@ -29,3 +29,15 @@ func TestCodexTimeoutKillsLauncherProcessGroup(t *testing.T) {
 		t.Fatalf("process group was not terminated promptly: %s", elapsed)
 	}
 }
+
+func TestDecodeAnalysisResultUsesServerOwnedEvidenceMetadata(t *testing.T) {
+	message := Message{ID: "om_1", ChatID: "chat_1", SenderName: "用户", CreatedAt: time.Now()}
+	raw := []byte(`{"new_demands":[{"title":"修复部署失败","description":"部署当前失败，需要定位并恢复。","next_action":"检查失败日志并提交修复","project_hint":"Server","sources":[{"external_id":"om_1","excerpt":"部署失败了"}]}],"progress_updates":[],"reviews":[],"skipped_message_ids":[],"missing_context_message_ids":[]}`)
+	result, err := decodeAnalysisResult(raw, []AnalysisInput{{Messages: []Message{message}, Candidates: []Message{message}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.NewDemands) != 1 || result.NewDemands[0].Sources[0].ExternalID != message.ID {
+		t.Fatalf("result = %+v", result)
+	}
+}
