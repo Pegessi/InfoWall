@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Demand, DemandReview, Project } from "./model";
-import { DemandCard, PendingCard, ProjectCard, ReviewCard } from "./WorkbenchPage";
+import { DemandCard, PendingCard, ProjectCard, ReviewCard, sortDemands } from "./WorkbenchPage";
 
 const project: Project = {
   id: "project-xperf",
@@ -46,6 +46,29 @@ const demand: Demand = {
 };
 
 afterEach(cleanup);
+
+describe("sortDemands", () => {
+  it("puts completed demands after every unfinished demand in the default view", () => {
+    const activeP2 = { ...demand, id: "active-p2", status: "active" as const, priority: "p2" as const, updatedAt: "2026-08-09T09:00:00+08:00" };
+    const plannedP1 = { ...demand, id: "planned-p1", status: "planned" as const, priority: "p1" as const, updatedAt: "2026-08-09T08:00:00+08:00" };
+    const doneP0 = { ...demand, id: "done-p0", status: "done" as const, priority: "p0" as const, updatedAt: "2026-08-09T11:00:00+08:00" };
+    const doneP2 = { ...demand, id: "done-p2", status: "done" as const, priority: "p2" as const, updatedAt: "2026-08-09T12:00:00+08:00" };
+
+    expect(sortDemands([doneP2, doneP0, activeP2, plannedP1], true).map((item) => item.id)).toEqual([
+      plannedP1.id,
+      activeP2.id,
+      doneP0.id,
+      doneP2.id,
+    ]);
+  });
+
+  it("keeps priority ordering when completion demotion is not requested", () => {
+    const doneP1 = { ...demand, id: "done-p1", status: "done" as const, priority: "p1" as const };
+    const doneP0 = { ...demand, id: "done-p0", status: "done" as const, priority: "p0" as const };
+
+    expect(sortDemands([doneP1, doneP0]).map((item) => item.id)).toEqual([doneP0.id, doneP1.id]);
+  });
+});
 
 describe("PendingCard", () => {
   it("shows a complete preview before revealing the edit form", () => {

@@ -89,8 +89,9 @@ function formatDate(value?: string): string {
   }).format(date);
 }
 
-function sortDemands(demands: Demand[]): Demand[] {
+export function sortDemands(demands: Demand[], doneLast = false): Demand[] {
   return [...demands].sort((a, b) =>
+    (doneLast ? Number(a.status === "done") - Number(b.status === "done") : 0) ||
     PRIORITY[a.priority].rank - PRIORITY[b.priority].rank ||
     Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
 }
@@ -809,7 +810,7 @@ export function WorkbenchPage({ section, onSectionChange }: WorkbenchPageProps) 
     if (projectFilter !== "all" && (projectFilter === "unassigned" ? Boolean(demand.projectId) : demand.projectId !== projectFilter)) return false;
     const text = `${demand.title} ${demand.summary} ${demand.nextStep ?? ""}`.toLowerCase();
     return text.includes(query.trim().toLowerCase());
-  })), [projectFilter, query, statusFilter, workbench.demands]);
+  }), statusFilter === "all"), [projectFilter, query, statusFilter, workbench.demands]);
 
   const openProject = (id: string) => { setProjectFilter(id); onSectionChange?.("demands"); };
   return (
