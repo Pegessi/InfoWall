@@ -89,6 +89,26 @@ function formatDate(value?: string): string {
   }).format(date);
 }
 
+function formatCompactDate(value?: string): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const now = new Date();
+  const sameDay = date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate();
+  return new Intl.DateTimeFormat("zh-CN", sameDay
+    ? { hour: "2-digit", minute: "2-digit" }
+    : { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
+}
+
+function formatCompactNumber(value: number): string {
+  return new Intl.NumberFormat("zh-CN", {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value);
+}
+
 export function sortDemands(demands: Demand[], doneLast = false): Demand[] {
   return [...demands].sort((a, b) =>
     (doneLast ? Number(a.status === "done") - Number(b.status === "done") : 0) ||
@@ -233,36 +253,94 @@ export function IngestionBar({ integration, latestRun, busy, onScan }: {
   const analyzerProfileId = latestRun?.analyzerProfileId ?? integration?.analyzerProfileId;
   const analyzerProfileFingerprint = latestRun?.analyzerProfileFingerprint ?? integration?.analyzerProfileFingerprint;
   const analyzerHealthy = latestRun?.analyzerHealthy ?? integration?.analyzerHealthy;
+  const fallbackSummary = primaryError?.includes("invalid-json") || primaryError?.includes("strict schema")
+    ? "day1 输出格式异常，已回退 Codex"
+    : "day1 分析失败，已回退 Codex";
+  const hasTokenUsage = Boolean(latestRun && latestRun.inputTokens > 0);
   return (
-    <div className="mb-4 flex flex-col gap-3 rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 py-3 sm:mb-6 sm:flex-row sm:items-center sm:justify-between sm:px-4">
-      <div className="flex min-w-0 items-start gap-3">
-        <div className={`mt-0.5 rounded-lg p-2 ${failed ? "bg-red-500/10 text-red-500" : "bg-violet-500/10 text-violet-500"}`}>
+    <section aria-label="统一进展采集" className="mb-4 rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 py-3 sm:mb-6 sm:px-4">
+      <div className="flex min-w-0 items-start gap-2.5 sm:gap-3">
+        <div className={`mt-0.5 shrink-0 rounded-lg p-2 ${failed ? "bg-red-500/10 text-red-500" : "bg-violet-500/10 text-violet-500"}`}>
           <Sparkles className={`h-4 w-4 ${running ? "animate-pulse" : ""}`} />
         </div>
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
-            统一进展采集
-            <span className={`rounded-full px-2 py-0.5 text-[10px] ${failed ? "bg-red-500/10 text-red-600" : running ? "bg-violet-500/10 text-violet-600" : enabled ? "bg-emerald-500/10 text-emerald-600" : "bg-zinc-500/10 text-zinc-500"}`}>{status}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
+            <h2 className="truncate text-sm font-semibold">统一进展采集</h2>
+            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] ${failed ? "bg-red-500/10 text-red-600" : running ? "bg-violet-500/10 text-violet-600" : enabled ? "bg-emerald-500/10 text-emerald-600" : "bg-zinc-500/10 text-zinc-500"}`}>{status}</span>
+            {enabled && route && (
+              <span className={`hidden shrink-0 rounded-full px-2 py-0.5 text-[10px] sm:inline-flex ${fallback ? "bg-amber-500/10 text-amber-700 dark:text-amber-400" : "bg-blue-500/10 text-blue-700 dark:text-blue-300"}`}>
+                {analyzerLabel}
+              </span>
+            )}
+            <button
+              type="button"
+              disabled={busy || running || !enabled}
+              onClick={onScan}
+              aria-label={!enabled ? "尚未启用" : failed ? "立即重试" : running ? "正在采集" : "立即扫描"}
+              className="ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center gap-1.5 rounded-md border border-[hsl(var(--border))] text-xs font-medium hover:bg-[hsl(var(--muted))] disabled:opacity-50 sm:w-auto sm:px-3"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${running ? "animate-spin" : ""}`} />
+              <span className="hidden sm:inline">{!enabled ? "尚未启用" : failed ? "立即重试" : running ? "正在采集" : "立即扫描"}</span>
+            </button>
           </div>
-          <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[hsl(var(--muted-foreground))]">
-            {enabled && <span>{integration?.activeStart}–{integration?.activeEnd} · 每 {integration?.intervalMinutes} 分钟</span>}
-            {enabled && <span title="飞书群聊仅保留我发送、明确 @我，或我参与线程中的消息；本地对话只保留目标和最终结果">来源：飞书 + Codex + 本地 Claude</span>}
-            <span>最近成功：{formatDate(integration?.lastSuccessEnd)}</span>
-            {enabled && <span>下次：{formatDate(integration?.nextRunAt)}</span>}
-            {latestRun?.status === "success" && <span>上轮：新建 {latestRun.created} · 更新 {latestRun.updated} · 审核 {latestRun.reviewCount} · 跳过 {latestRun.skipped}</span>}
-            {latestRun && <span>事件：飞书 {latestRun.feishuCandidates} · Codex {latestRun.codexCandidates} · Claude {latestRun.claudeCandidates}</span>}
-            {enabled && <span>分析器：{analyzerLabel}</span>}
-            {enabled && analyzerProfileId && <span title={`本地配置 ${analyzerProfileId} · 指纹 ${analyzerProfileFingerprint ?? "未知"}`}>day1 配置：{analyzerHealthy ? "正常" : "不可用"}</span>}
-            {latestRun && latestRun.inputTokens > 0 && <span>Token：{latestRun.inputTokens.toLocaleString()} 输入 · {latestRun.cachedInputTokens.toLocaleString()} 缓存 · {latestRun.outputTokens.toLocaleString()} 输出</span>}
-            {fallback && <span className="basis-full rounded-md bg-amber-500/10 px-2 py-1 text-amber-700 dark:text-amber-400">day1 不可用，正在使用 Codex{primaryError ? `：${primaryError}` : ""}</span>}
-            {integration?.lastError && <span className="basis-full break-words text-red-500">{integration.lastError}</span>}
+
+          <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+            <div className="min-w-0 rounded-md bg-[hsl(var(--muted)/0.55)] px-2 py-1.5">
+              <div className="text-[10px] text-[hsl(var(--muted-foreground))]">运行</div>
+              <div className="mt-0.5 truncate text-[11px] font-medium tabular-nums sm:text-xs" title={enabled ? `${integration?.activeStart}–${integration?.activeEnd} · 每 ${integration?.intervalMinutes} 分钟` : "未启用"}>
+                {enabled ? `${integration?.activeStart}–${integration?.activeEnd} · ${integration?.intervalMinutes}m` : "未启用"}
+              </div>
+            </div>
+            <div className="min-w-0 rounded-md bg-[hsl(var(--muted)/0.55)] px-2 py-1.5">
+              <div className="text-[10px] text-[hsl(var(--muted-foreground))]">调度</div>
+              <div className="mt-0.5 truncate text-[11px] font-medium tabular-nums sm:text-xs" title={`最近 ${formatDate(integration?.lastSuccessEnd)} · 下次 ${formatDate(integration?.nextRunAt)}`}>
+                最近 {formatCompactDate(integration?.lastSuccessEnd)} · 下次 {enabled ? formatCompactDate(integration?.nextRunAt) : "—"}
+              </div>
+            </div>
+            <div className="min-w-0 rounded-md bg-[hsl(var(--muted)/0.55)] px-2 py-1.5">
+              <div className="text-[10px] text-[hsl(var(--muted-foreground))]">上轮结果</div>
+              <div className="mt-0.5 truncate text-[11px] font-medium tabular-nums sm:text-xs">
+                {latestRun?.status === "success" ? `新 ${latestRun.created} · 更 ${latestRun.updated} · 审 ${latestRun.reviewCount} · 跳 ${latestRun.skipped}` : "暂无成功记录"}
+              </div>
+            </div>
+            <div className="min-w-0 rounded-md bg-[hsl(var(--muted)/0.55)] px-2 py-1.5" title="飞书群聊仅保留我发送、明确 @我，或我参与线程中的消息；本地对话只保留目标和最终结果">
+              <div className="text-[10px] text-[hsl(var(--muted-foreground))]">候选事件</div>
+              <div className="mt-0.5 truncate text-[11px] font-medium tabular-nums sm:text-xs">
+                {latestRun ? `飞书 ${latestRun.feishuCandidates} · C ${latestRun.codexCandidates} · Claude ${latestRun.claudeCandidates}` : "尚无事件"}
+              </div>
+            </div>
           </div>
+
+          {(fallback || integration?.lastError || hasTokenUsage || analyzerProfileId) && (
+            <details className={`group mt-2 rounded-md ${integration?.lastError ? "bg-red-500/10 text-red-600 dark:text-red-400" : fallback ? "bg-amber-500/10 text-amber-700 dark:text-amber-400" : "bg-[hsl(var(--muted)/0.5)] text-[hsl(var(--muted-foreground))]"}`}>
+              <summary className="flex min-h-8 cursor-pointer list-none items-center gap-1.5 px-2 py-1.5 text-[11px] font-medium [&::-webkit-details-marker]:hidden">
+                {(fallback || integration?.lastError) && <AlertCircle className="h-3.5 w-3.5 shrink-0" />}
+                <span className="min-w-0 flex-1 truncate">
+                  {integration?.lastError ? "采集运行异常" : fallback ? fallbackSummary : `运行详情${hasTokenUsage ? ` · Token ${formatCompactNumber(latestRun!.inputTokens)}` : ""}`}
+                </span>
+                <ChevronDown className="h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-180" />
+              </summary>
+              <div className="grid gap-2 border-t border-current/10 px-2 py-2 text-[11px] leading-relaxed sm:grid-cols-3">
+                <div>
+                  <div className="opacity-70">分析器</div>
+                  <div className="mt-0.5 text-[hsl(var(--foreground))]">{analyzerLabel} · day1 {analyzerHealthy ? "上轮正常" : fallback ? "上轮异常" : "待验证"}</div>
+                </div>
+                {hasTokenUsage && (
+                  <div>
+                    <div className="opacity-70">Token</div>
+                    <div className="mt-0.5 break-words text-[hsl(var(--foreground))]">输入 {latestRun!.inputTokens.toLocaleString()} · 缓存 {latestRun!.cachedInputTokens.toLocaleString()} · 输出 {latestRun!.outputTokens.toLocaleString()}</div>
+                  </div>
+                )}
+                <div className="min-w-0">
+                  <div className="opacity-70">技术详情</div>
+                  <div className="mt-0.5 break-words text-[hsl(var(--foreground))]">{integration?.lastError ?? primaryError ?? (analyzerProfileId ? `本地配置 ${analyzerProfileId} · 指纹 ${analyzerProfileFingerprint ?? "未知"}` : "暂无异常")}</div>
+                </div>
+              </div>
+            </details>
+          )}
         </div>
       </div>
-      <button type="button" disabled={busy || running || !enabled} onClick={onScan} className="inline-flex h-10 w-full shrink-0 items-center justify-center gap-1.5 rounded-md border border-[hsl(var(--border))] px-3 text-xs font-medium hover:bg-[hsl(var(--muted))] disabled:opacity-50 sm:h-8 sm:w-auto">
-        <RefreshCw className={`h-3.5 w-3.5 ${running ? "animate-spin" : ""}`} />{!enabled ? "尚未启用" : failed ? "立即重试" : running ? "正在采集" : "立即扫描"}
-      </button>
-    </div>
+    </section>
   );
 }
 
