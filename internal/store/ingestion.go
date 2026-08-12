@@ -16,27 +16,38 @@ import (
 const ingestionStateColumns = `enabled, timezone, active_start, active_end,
 	interval_minutes, overlap_minutes, excluded_chat_ids, last_success_end,
 	last_backfill_at, next_run_at, status, last_error, current_run_id,
-	lease_until, requested, updated_at`
+	lease_until, requested, analyzer_route, analyzer_profile_id,
+	analyzer_profile_fingerprint, analyzer_healthy, fallback_active, last_primary_error, updated_at`
 
 const ingestionRunColumns = `id, trigger, status, window_start, window_end,
 	messages_seen, messages_candidate, created, updated, skipped, review_count,
 	missing_context_count, input_tokens, cached_input_tokens, output_tokens,
+	feishu_candidates, codex_candidates, claude_candidates, analyzer_route,
+	analyzer_profile_id, analyzer_profile_fingerprint, analyzer_healthy,
+	fallback_used, primary_error,
 	started_at, finished_at, error`
 
 func (s *Store) GetFeishuIngestionState(ctx context.Context) (*model.FeishuIngestionState, error) {
-	return scanIngestionState(s.db.QueryRowContext(ctx,
+	state, err := scanIngestionState(s.db.QueryRowContext(ctx,
 		`SELECT `+ingestionStateColumns+` FROM feishu_ingestion_state WHERE id = 1`).Scan)
+	if err != nil {
+		return nil, err
+	}
+	state.SourceWatermarks, err = s.conversationWatermarks(ctx)
+	return state, err
 }
 
 func scanIngestionState(scan func(...any) error) (*model.FeishuIngestionState, error) {
 	var state model.FeishuIngestionState
-	var enabled, requested int
+	var enabled, requested, analyzerHealthy, fallbackActive int
 	var exclusions string
 	var successRaw, backfillRaw, nextRaw, leaseRaw, updatedRaw any
 	if err := scan(&enabled, &state.Timezone, &state.ActiveStart, &state.ActiveEnd,
 		&state.IntervalMinutes, &state.OverlapMinutes, &exclusions, &successRaw,
 		&backfillRaw, &nextRaw, &state.Status, &state.LastError, &state.CurrentRunID,
-		&leaseRaw, &requested, &updatedRaw); err != nil {
+		&leaseRaw, &requested, &state.AnalyzerRoute, &state.AnalyzerProfileID,
+		&state.AnalyzerProfileFingerprint, &analyzerHealthy, &fallbackActive,
+		&state.LastPrimaryError, &updatedRaw); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrNotFound
 		}
@@ -44,6 +55,8 @@ func scanIngestionState(scan func(...any) error) (*model.FeishuIngestionState, e
 	}
 	state.Enabled = enabled != 0
 	state.Requested = requested != 0
+	state.AnalyzerHealthy = analyzerHealthy != 0
+	state.FallbackActive = fallbackActive != 0
 	if err := json.Unmarshal([]byte(exclusions), &state.ExcludedChatIDs); err != nil {
 		return nil, fmt.Errorf("decode Feishu ingestion exclusions: %w", err)
 	}
@@ -405,9 +418,20 @@ func (s *Store) CompleteFeishuIngestion(ctx context.Context, commit model.Feishu
 	if _, err := tx.ExecContext(ctx, `UPDATE feishu_ingestion_runs SET status = 'success',
 		messages_seen = ?, messages_candidate = ?, created = ?, updated = ?, skipped = ?,
 		review_count = ?, missing_context_count = ?, input_tokens = ?, cached_input_tokens = ?,
-		output_tokens = ?, finished_at = ?, error = '' WHERE id = ?`, commit.MessagesSeen,
+		output_tokens = ?, feishu_candidates = ?, codex_candidates = ?, claude_candidates = ?,
+		analyzer_route = ?, analyzer_profile_id = ?, analyzer_profile_fingerprint = ?,
+		analyzer_healthy = ?, fallback_used = ?, primary_error = ?, finished_at = ?, error = '' WHERE id = ?`, commit.MessagesSeen,
 		commit.MessagesCandidate, created, updated, skipped, reviews, commit.MissingContextCount,
-		commit.InputTokens, commit.CachedInputTokens, commit.OutputTokens, now, commit.RunID); err != nil {
+		commit.InputTokens, commit.CachedInputTokens, commit.OutputTokens, commit.FeishuCandidates,
+		commit.CodexCandidates, commit.ClaudeCandidates, commit.AnalyzerRoute,
+		commit.AnalyzerProfileID, commit.AnalyzerProfileFingerprint, boolInt(commit.AnalyzerHealthy), boolInt(commit.FallbackUsed),
+		truncateError(commit.PrimaryError), now, commit.RunID); err != nil {
+		return nil, err
+	}
+	if err := markConversationHookEventsProcessedTx(ctx, tx, commit.ProcessedHookEventIDs, now); err != nil {
+		return nil, err
+	}
+	if err := updateConversationWatermarksTx(ctx, tx, commit.WindowEnd); err != nil {
 		return nil, err
 	}
 	var backfill any
@@ -417,8 +441,19 @@ func (s *Store) CompleteFeishuIngestion(ctx context.Context, commit model.Feishu
 	if _, err := tx.ExecContext(ctx, `UPDATE feishu_ingestion_state SET
 		last_success_end = ?, last_backfill_at = COALESCE(?, last_backfill_at),
 		status = CASE WHEN enabled = 1 THEN 'idle' ELSE 'disabled' END,
-		last_error = '', current_run_id = '', lease_until = NULL, updated_at = ?
-		WHERE id = 1 AND current_run_id = ?`, commit.WindowEnd.UTC(), backfill, now, commit.RunID); err != nil {
+		last_error = '', current_run_id = '', lease_until = NULL,
+		analyzer_route = CASE WHEN ? = '' THEN analyzer_route ELSE ? END,
+		analyzer_profile_id = CASE WHEN ? = '' THEN analyzer_profile_id ELSE ? END,
+		analyzer_profile_fingerprint = CASE WHEN ? = '' THEN analyzer_profile_fingerprint ELSE ? END,
+		analyzer_healthy = CASE WHEN ? = '' THEN analyzer_healthy ELSE ? END,
+		fallback_active = CASE WHEN ? = '' THEN fallback_active ELSE ? END,
+		last_primary_error = CASE WHEN ? = '' THEN last_primary_error ELSE ? END,
+		updated_at = ?
+		WHERE id = 1 AND current_run_id = ?`, commit.WindowEnd.UTC(), backfill,
+		commit.AnalyzerRoute, commit.AnalyzerRoute, commit.AnalyzerRoute, commit.AnalyzerProfileID,
+		commit.AnalyzerRoute, commit.AnalyzerProfileFingerprint, commit.AnalyzerRoute, boolInt(commit.AnalyzerHealthy),
+		commit.AnalyzerRoute, boolInt(commit.FallbackUsed), commit.AnalyzerRoute, truncateError(commit.PrimaryError),
+		now, commit.RunID); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -560,11 +595,15 @@ func (s *Store) GetFeishuIngestionRun(ctx context.Context, id string) (*model.Fe
 
 func scanIngestionRun(scan func(...any) error) (*model.FeishuIngestionRun, error) {
 	var run model.FeishuIngestionRun
+	var analyzerHealthy, fallbackUsed int
 	var startRaw, endRaw, startedRaw, finishedRaw any
 	if err := scan(&run.ID, &run.Trigger, &run.Status, &startRaw, &endRaw,
 		&run.MessagesSeen, &run.MessagesCandidate, &run.Created, &run.Updated,
 		&run.Skipped, &run.ReviewCount, &run.MissingContextCount, &run.InputTokens,
-		&run.CachedInputTokens, &run.OutputTokens, &startedRaw, &finishedRaw, &run.Error); err != nil {
+		&run.CachedInputTokens, &run.OutputTokens, &run.FeishuCandidates, &run.CodexCandidates,
+		&run.ClaudeCandidates, &run.AnalyzerRoute, &run.AnalyzerProfileID,
+		&run.AnalyzerProfileFingerprint, &analyzerHealthy, &fallbackUsed, &run.PrimaryError,
+		&startedRaw, &finishedRaw, &run.Error); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrNotFound
 		}
@@ -574,6 +613,8 @@ func scanIngestionRun(scan func(...any) error) (*model.FeishuIngestionRun, error
 	run.WindowEnd = parseSQLiteTime(endRaw)
 	run.StartedAt = parseSQLiteTime(startedRaw)
 	run.FinishedAt = optionalSQLiteTime(finishedRaw)
+	run.FallbackUsed = fallbackUsed != 0
+	run.AnalyzerHealthy = analyzerHealthy != 0
 	return &run, nil
 }
 

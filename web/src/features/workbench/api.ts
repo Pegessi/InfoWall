@@ -271,7 +271,11 @@ export async function syncFeishuIntegration(): Promise<void> {
 }
 
 export async function fetchFeishuChatIntegration(): Promise<FeishuChatIntegration> {
-  const raw = await request<JsonRecord>("/api/integrations/feishu-chat");
+  const raw = await request<JsonRecord>("/api/integrations/activity");
+  const rawWatermarks = raw.source_watermarks;
+  const sourceWatermarks = rawWatermarks && typeof rawWatermarks === "object" && !Array.isArray(rawWatermarks)
+    ? Object.fromEntries(Object.entries(rawWatermarks).flatMap(([key, value]) => typeof value === "string" ? [[key, value]] : []))
+    : {};
   return {
     enabled: Boolean(raw.enabled),
     timezone: String(raw.timezone ?? "Asia/Shanghai"),
@@ -284,11 +288,18 @@ export async function fetchFeishuChatIntegration(): Promise<FeishuChatIntegratio
     nextRunAt: meaningfulTimestamp(stringValue(raw, "nextRunAt", "next_run_at")),
     status: String(raw.status ?? "disabled"),
     lastError: stringValue(raw, "lastError", "last_error"),
+    analyzerRoute: stringValue(raw, "analyzerRoute", "analyzer_route"),
+    analyzerProfileId: stringValue(raw, "analyzerProfileId", "analyzer_profile_id"),
+    analyzerProfileFingerprint: stringValue(raw, "analyzerProfileFingerprint", "analyzer_profile_fingerprint"),
+    analyzerHealthy: Boolean(raw.analyzer_healthy),
+    fallbackActive: Boolean(raw.fallback_active),
+    lastPrimaryError: stringValue(raw, "lastPrimaryError", "last_primary_error"),
+    sourceWatermarks,
   };
 }
 
 export async function fetchFeishuIngestionRuns(): Promise<FeishuIngestionRun[]> {
-  const raw = await request<{ runs?: JsonRecord[] }>("/api/integrations/feishu-chat/runs?limit=5");
+  const raw = await request<{ runs?: JsonRecord[] }>("/api/integrations/activity/runs?limit=5");
   return (raw.runs ?? []).map((row) => ({
     id: String(row.id ?? ""), status: String(row.status ?? ""), trigger: String(row.trigger ?? ""),
     windowStart: String(row.window_start ?? ""), windowEnd: String(row.window_end ?? ""),
@@ -296,13 +307,19 @@ export async function fetchFeishuIngestionRuns(): Promise<FeishuIngestionRun[]> 
     created: Number(row.created ?? 0), updated: Number(row.updated ?? 0), skipped: Number(row.skipped ?? 0),
     reviewCount: Number(row.review_count ?? 0), inputTokens: Number(row.input_tokens ?? 0),
     cachedInputTokens: Number(row.cached_input_tokens ?? 0), outputTokens: Number(row.output_tokens ?? 0),
+    feishuCandidates: Number(row.feishu_candidates ?? 0), codexCandidates: Number(row.codex_candidates ?? 0),
+    claudeCandidates: Number(row.claude_candidates ?? 0), analyzerRoute: stringValue(row, "analyzerRoute", "analyzer_route"),
+    analyzerProfileId: stringValue(row, "analyzerProfileId", "analyzer_profile_id"),
+    analyzerProfileFingerprint: stringValue(row, "analyzerProfileFingerprint", "analyzer_profile_fingerprint"),
+    analyzerHealthy: Boolean(row.analyzer_healthy),
+    fallbackUsed: Boolean(row.fallback_used), primaryError: stringValue(row, "primaryError", "primary_error"),
     startedAt: String(row.started_at ?? ""), finishedAt: meaningfulTimestamp(stringValue(row, "finishedAt", "finished_at")),
     error: stringValue(row, "error"),
   }));
 }
 
 export async function scanFeishuNow(): Promise<void> {
-  await request<unknown>("/api/integrations/feishu-chat/scan", { method: "POST" });
+  await request<unknown>("/api/integrations/activity/scan", { method: "POST" });
 }
 
 export async function fetchDemandReviews(): Promise<DemandReview[]> {

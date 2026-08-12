@@ -37,6 +37,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/infowall/infowall/internal/conversationingest"
 	"github.com/infowall/infowall/internal/server"
 	"github.com/infowall/infowall/internal/store"
 )
@@ -98,6 +99,10 @@ func run(args []string) error {
 		return cmdScan(rest)
 	case "agent":
 		return cmdAgent(rest)
+	case "hook":
+		return cmdHook(rest)
+	case "hooks":
+		return cmdHooks(rest)
 	case "version", "--version", "-v":
 		fmt.Printf("infowall v%s (commit %s)\n", version, commit)
 		return nil
@@ -129,8 +134,10 @@ Usage:
   infowall demand <apply|create|import|list|get|update|progress|dismiss|restore|review> [flags]
   infowall project <create|list|update|archive> [flags]
   infowall sync feishu <setup|status|now|disable> [flags]
-  infowall scan feishu <setup|status|now|runs|disable> [flags]
+  infowall scan activity <setup|status|now|runs|disable> [flags]
+  infowall scan feishu <setup|status|now|runs|disable> [flags]  # compatibility alias
   infowall agent spec [--json]
+  infowall hooks <install|status> [--bin PATH] [--server URL] [--json]
   infowall version
 
 Examples:
@@ -153,6 +160,8 @@ Examples:
   infowall demand progress DEMAND_ID --text "已收集日志" --link "https://logs.example/run/1" --json
   infowall project create --name "M15 性能" --json
   infowall sync feishu setup --create --json
+  infowall hooks install --json
+  infowall scan activity setup --json
 
 Agent-friendly notes:
   * Run infowall agent spec --json to discover commands, enums, input shapes,
@@ -175,16 +184,22 @@ func cmdServe(args []string) error {
 	dev := fs.Bool("dev", false, "dev mode: proxy frontend to Vite on :5173")
 	apiKey := fs.String("api-key", os.Getenv("INFOWALL_API_KEY"), "API key for write/auth")
 	defaultView := fs.String("default-view", envOr("INFOWALL_DEFAULT_VIEW", "workbench"), "default frontend: infowall or workbench")
+	claudePath := fs.String("claude-path", os.Getenv("INFOWALL_CLAUDE_PATH"), "Claude Code executable (auto-detected by default)")
+	claudeHubTabs := fs.String("claude-hub-tabs", os.Getenv("INFOWALL_CLAUDE_HUB_TABS"), "read-only Claude Hub tabs.json path")
+	claudeHubTabID := fs.String("claude-day1-tab", os.Getenv("INFOWALL_CLAUDE_DAY1_TAB_ID"), "local Claude Hub day1 tab ID (auto-detected by model when empty)")
 	fs.Parse(args)
 
 	ctx := context.Background()
 	s, err := server.New(ctx, server.Config{
-		Addr:        *addr,
-		DBPath:      *db,
-		Dev:         *dev,
-		APIKey:      *apiKey,
-		DistFS:      distFS(),
-		DefaultView: *defaultView,
+		Addr:              *addr,
+		DBPath:            *db,
+		Dev:               *dev,
+		APIKey:            *apiKey,
+		DistFS:            distFS(),
+		DefaultView:       *defaultView,
+		ClaudePath:        *claudePath,
+		ClaudeHubTabsPath: *claudeHubTabs,
+		ClaudeHubTabID:    *claudeHubTabID,
 	})
 	if err != nil {
 		return err
@@ -1119,6 +1134,198 @@ func cmdDBBackup(args []string) error {
 	}
 	fmt.Printf("backed up %s → %s (%d bytes)\n", res.Source, res.Out, res.SizeBytes)
 	return nil
+}
+
+// --- local agent hooks ---
+
+func cmdHook(args []string) error {
+	if len(args) == 0 || args[0] != "ingest" {
+		return errors.New("usage: infowall hook ingest --source codex|claude --event UserPromptSubmit|Stop")
+	}
+	fs := flag.NewFlagSet("hook ingest", flag.ContinueOnError)
+	source := fs.String("source", "", "hook source")
+	eventName := fs.String("event", "", "hook event name")
+	stateDir := fs.String("state-dir", conversationingest.DefaultStateDir(), "private hook state directory")
+	cfg := addClientFlags(fs)
+	parseFlags(fs, args[1:])
+	// Hooks must never interrupt the user's agent session. All failures become a
+	// best-effort spool write and the protocol response remains an empty object.
+	defer fmt.Fprintln(os.Stdout, "{}")
+	if os.Getenv("INFOWALL_SUMMARY_RUNNER") == "1" {
+		return nil
+	}
+	raw, err := io.ReadAll(io.LimitReader(os.Stdin, 2<<20))
+	if err != nil {
+		return nil
+	}
+	event, err := conversationingest.NormalizeHookPayload(*source, *eventName, raw, *stateDir)
+	if err != nil {
+		return nil
+	}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		cfg.url("/api/integrations/conversations/events"), bytes.NewReader(payload))
+	if err == nil {
+		req.Header.Set("Content-Type", "application/json")
+		if cfg.apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+cfg.apiKey)
+		}
+		response, requestErr := (&http.Client{Timeout: 750 * time.Millisecond}).Do(req)
+		if requestErr == nil {
+			io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+			response.Body.Close()
+			if response.StatusCode >= 200 && response.StatusCode < 300 {
+				return nil
+			}
+		}
+	}
+	_ = conversationingest.WriteSpool(*stateDir, event)
+	return nil
+}
+
+func cmdHooks(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: infowall hooks <install|status> [--bin PATH] [--server URL] [--json]")
+	}
+	fs := flag.NewFlagSet("hooks "+args[0], flag.ContinueOnError)
+	binPath := fs.String("bin", "", "absolute infowall binary path")
+	serverURL := fs.String("server", envOr("INFOWALL_URL", "http://localhost:8899"), "InfoWall server URL")
+	asJSON := fs.Bool("json", false, "output machine-readable JSON")
+	parseFlags(fs, args[1:])
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return failLocal(*asJSON, err)
+	}
+	if *binPath == "" {
+		*binPath, err = os.Executable()
+		if err != nil {
+			return failLocal(*asJSON, err)
+		}
+	}
+	*binPath, _ = filepath.Abs(*binPath)
+	paths := map[string]string{"codex": filepath.Join(home, ".codex", "hooks.json"),
+		"claude": filepath.Join(home, ".claude", "settings.json")}
+	switch args[0] {
+	case "install":
+		for source, path := range paths {
+			if err := installConversationHooks(path, source, *binPath, *serverURL); err != nil {
+				return failLocal(*asJSON, err)
+			}
+		}
+	case "status":
+		// Read-only below.
+	default:
+		return failLocal(*asJSON, errors.New("hooks action must be install or status"))
+	}
+	status := map[string]any{"binary": *binPath, "server": *serverURL}
+	for source, path := range paths {
+		installed, readErr := conversationHooksInstalled(path, source)
+		if readErr != nil {
+			return failLocal(*asJSON, readErr)
+		}
+		entry := map[string]any{"installed": installed, "path": path}
+		if source == "codex" {
+			entry["trust_required"] = true
+			entry["trust_hint"] = "Open /hooks in Codex and trust this hook before expecting events."
+		}
+		status[source] = entry
+	}
+	if *asJSON {
+		writeJSONStdout(status)
+	} else {
+		fmt.Printf("Codex hooks: %v\nClaude hooks: %v\n", status["codex"], status["claude"])
+	}
+	return nil
+}
+
+func installConversationHooks(path, source, binPath, serverURL string) error {
+	root := map[string]any{}
+	if raw, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(raw, &root); err != nil {
+			return fmt.Errorf("decode %s: %w", path, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	hooks, _ := root["hooks"].(map[string]any)
+	if hooks == nil {
+		hooks = map[string]any{}
+		root["hooks"] = hooks
+	}
+	for _, eventName := range []string{"UserPromptSubmit", "Stop"} {
+		entries, _ := hooks[eventName].([]any)
+		marker := "hook ingest --source " + source + " --event " + eventName
+		if jsonContainsString(entries, marker) {
+			continue
+		}
+		guard := `[ "${INFOWALL_SUMMARY_RUNNER:-}" = "1" ]`
+		command := "if " + guard + "; then cat >/dev/null 2>&1 || :; else " +
+			shellQuote(binPath) + " hook ingest --source " + source + " --event " + eventName +
+			" --server " + shellQuote(serverURL) + "; fi"
+		entries = append(entries, map[string]any{"hooks": []any{map[string]any{
+			"type": "command", "command": command, "timeout": 1,
+		}}})
+		hooks[eventName] = entries
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return err
+	}
+	temporary := path + ".infowall.tmp"
+	if err := os.WriteFile(temporary, append(raw, '\n'), 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(temporary, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(temporary, path)
+}
+
+func conversationHooksInstalled(path, source string) (bool, error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return false, err
+	}
+	return jsonContainsString(root["hooks"], "hook ingest --source "+source), nil
+}
+
+func jsonContainsString(value any, needle string) bool {
+	switch typed := value.(type) {
+	case string:
+		return strings.Contains(typed, needle)
+	case []any:
+		for _, item := range typed {
+			if jsonContainsString(item, needle) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, item := range typed {
+			if jsonContainsString(item, needle) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
 // failLocal emits an error for the local (non-HTTP) db commands using the same

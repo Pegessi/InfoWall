@@ -2,8 +2,8 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Demand, DemandReview, Project } from "./model";
-import { DemandCard, PendingCard, ProjectCard, ReviewCard, sortDemands } from "./WorkbenchPage";
+import type { Demand, DemandReview, FeishuChatIntegration, FeishuIngestionRun, Project } from "./model";
+import { DemandCard, IngestionBar, PendingCard, ProjectCard, ReviewCard, sortDemands } from "./WorkbenchPage";
 
 const project: Project = {
   id: "project-xperf",
@@ -46,6 +46,33 @@ const demand: Demand = {
 };
 
 afterEach(cleanup);
+
+describe("IngestionBar", () => {
+  it("shows all local sources, analyzer route, token usage, and fallback state", () => {
+    const integration: FeishuChatIntegration = {
+      enabled: true, timezone: "Asia/Shanghai", activeStart: "09:00", activeEnd: "23:00",
+      intervalMinutes: 30, overlapMinutes: 5, excludedChatIds: [], status: "idle",
+      analyzerRoute: "codex", analyzerProfileId: "local-day1", analyzerProfileFingerprint: "abc123",
+      analyzerHealthy: false, fallbackActive: true, lastPrimaryError: "day1 unavailable", sourceWatermarks: {},
+    };
+    const latestRun: FeishuIngestionRun = {
+      id: "run-1", status: "success", trigger: "scheduled", windowStart: "2026-08-12T01:00:00Z",
+      windowEnd: "2026-08-12T01:30:00Z", messagesSeen: 6, messagesCandidate: 6, created: 0, updated: 2,
+      skipped: 4, reviewCount: 0, inputTokens: 1200, cachedInputTokens: 900, outputTokens: 80,
+      feishuCandidates: 2, codexCandidates: 3, claudeCandidates: 1, analyzerRoute: "codex", fallbackUsed: true,
+      analyzerProfileId: "local-day1", analyzerProfileFingerprint: "abc123", analyzerHealthy: false,
+      primaryError: "day1 unavailable", startedAt: "2026-08-12T01:30:00Z",
+    };
+    render(<IngestionBar integration={integration} latestRun={latestRun} busy={false} onScan={vi.fn()} />);
+
+    expect(screen.getByText("统一进展采集")).toBeTruthy();
+    expect(screen.getByText("事件：飞书 2 · Codex 3 · Claude 1")).toBeTruthy();
+    expect(screen.getByText("分析器：Codex（回退）")).toBeTruthy();
+    expect(screen.getByText("day1 配置：不可用")).toBeTruthy();
+    expect(screen.getByText(/1,200 输入 · 900 缓存 · 80 输出/)).toBeTruthy();
+    expect(screen.getByText(/day1 不可用，正在使用 Codex/)).toBeTruthy();
+  });
+});
 
 describe("sortDemands", () => {
   it("puts completed demands after every unfinished demand in the default view", () => {

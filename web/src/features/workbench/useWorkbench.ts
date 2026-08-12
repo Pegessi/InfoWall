@@ -65,7 +65,7 @@ export function useWorkbench() {
       if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
       refreshTimer.current = window.setTimeout(() => void refresh(), 180);
     };
-    ["demand.created", "demand.updated", "demand.deleted", "demand.progress", "project.created", "project.updated", "project.deleted", "feishu_sync.updated", "feishu_ingestion.updated", "demand_review.updated", "demand_review.accepted", "demand_review.dismissed"]
+    ["demand.created", "demand.updated", "demand.deleted", "demand.progress", "project.created", "project.updated", "project.deleted", "feishu_sync.updated", "feishu_ingestion.updated", "activity_ingestion.updated", "demand_review.updated", "demand_review.accepted", "demand_review.dismissed"]
       .forEach((name) => events.addEventListener(name, scheduleRefresh));
     return () => {
       events.close();

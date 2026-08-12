@@ -10,6 +10,12 @@ import (
 	"github.com/infowall/infowall/internal/model"
 )
 
+const (
+	recoveryWindowSize           = 12 * time.Hour
+	maximumRecoveryLookback      = 12 * time.Hour
+	maxCandidatesPerCodexRequest = 16
+)
+
 type Backend interface {
 	GetFeishuIngestionState(context.Context) (*model.FeishuIngestionState, error)
 	SetFeishuIngestionNextRun(context.Context, time.Time) error
@@ -22,12 +28,13 @@ type Backend interface {
 }
 
 type Worker struct {
-	Backend   Backend
-	Collector Collector
-	Analyzer  Analyzer
-	Enricher  Enricher
-	Now       func() time.Time
-	OnUpdate  func()
+	Backend        Backend
+	Collector      Collector
+	Analyzer       Analyzer
+	Enricher       Enricher
+	LocalCollector LocalCollector
+	Now            func() time.Time
+	OnUpdate       func()
 
 	wake chan struct{}
 	mu   sync.Mutex
@@ -116,6 +123,17 @@ func (w *Worker) runWindow(ctx context.Context, trigger string, start, end time.
 		_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, err.Error(), 0, 0, 0, 0, 0)
 		return err
 	}
+	localCollection := LocalCollection{}
+	if w.LocalCollector != nil {
+		localCollection, err = w.LocalCollector.CollectLocal(ctx, end)
+		if err != nil {
+			_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, err.Error(), collection.Seen, 0, 0, 0, 0)
+			return err
+		}
+		collection.Messages = append(collection.Messages, localCollection.Messages...)
+		collection.Candidates = append(collection.Candidates, localCollection.Messages...)
+		collection.Seen += localCollection.Seen
+	}
 	ids := make([]string, 0, len(collection.Candidates))
 	for _, message := range collection.Candidates {
 		ids = append(ids, message.ID)
@@ -133,7 +151,18 @@ func (w *Worker) runWindow(ctx context.Context, trigger string, start, end time.
 	}
 	commit := model.FeishuIngestionCommit{RunID: run.ID, WindowEnd: end.UTC(), BackfillAt: backfillAt,
 		MessagesSeen: collection.Seen, MessagesCandidate: len(newCandidates),
-		ProcessedMessageIDs: ids, Skipped: len(collection.Candidates) - len(newCandidates)}
+		ProcessedMessageIDs: ids, ProcessedHookEventIDs: localCollection.HookEventIDs,
+		Skipped: len(collection.Candidates) - len(newCandidates)}
+	for _, candidate := range newCandidates {
+		switch normalizedSourceKind(candidate) {
+		case "codex-conversation":
+			commit.CodexCandidates++
+		case "claude-conversation":
+			commit.ClaudeCandidates++
+		default:
+			commit.FeishuCandidates++
+		}
+	}
 	if len(newCandidates) == 0 {
 		_, err = w.Backend.CompleteFeishuIngestion(ctx, commit)
 		return err
@@ -149,7 +178,7 @@ func (w *Worker) runWindow(ctx context.Context, trigger string, start, end time.
 	}
 	batches := buildAnalysisBatches(start, end, collection.Messages, newCandidates, snapshot, resources)
 	var result Result
-	for _, request := range chunkAnalysisBatches(batches, 40) {
+	for _, request := range chunkAnalysisBatches(batches, maxCandidatesPerCodexRequest) {
 		if err := w.Backend.RenewFeishuIngestionLease(ctx, run.ID, 20*time.Minute); err != nil {
 			_ = w.Backend.FailFeishuIngestionRun(ctx, run.ID, err.Error(), collection.Seen, len(newCandidates),
 				result.InputTokens, result.CachedInputTokens, result.OutputTokens)
@@ -166,6 +195,12 @@ func (w *Worker) runWindow(ctx context.Context, trigger string, start, end time.
 	commit.InputTokens = result.InputTokens
 	commit.CachedInputTokens = result.CachedInputTokens
 	commit.OutputTokens = result.OutputTokens
+	commit.AnalyzerRoute = result.AnalyzerRoute
+	commit.AnalyzerProfileID = result.AnalyzerProfileID
+	commit.AnalyzerProfileFingerprint = result.AnalyzerProfileFingerprint
+	commit.AnalyzerHealthy = result.AnalyzerHealthy
+	commit.FallbackUsed = result.FallbackUsed
+	commit.PrimaryError = result.PrimaryError
 	commit.MissingContextCount = len(result.MissingContextIDs)
 	commit.Skipped += len(result.SkippedMessageIDs)
 	messages := make(map[string]Message, len(collection.Messages))
@@ -190,7 +225,7 @@ func (w *Worker) runWindow(ctx context.Context, trigger string, start, end time.
 	for _, update := range result.ProgressUpdates {
 		message := messages[update.Source.ExternalID]
 		commit.ProgressUpdates = append(commit.ProgressUpdates, model.DemandProgressUpdate{
-			DemandID: update.DemandID, Text: update.Text, DedupeKey: update.DedupeKey,
+			DemandID: update.DemandID, Text: update.Text, DedupeKey: progressDedupeKey(message, update.DemandID),
 			Source:     canonicalSource(message, update.Source.Excerpt),
 			Links:      progressLinksForMessage(message, resources),
 			Confidence: update.Confidence, Anchors: update.Anchors})
@@ -199,7 +234,7 @@ func (w *Worker) runWindow(ctx context.Context, trigger string, start, end time.
 		message := messages[item.Source.ExternalID]
 		commit.Reviews = append(commit.Reviews, model.DemandReview{Kind: "progress",
 			SuggestedDemandID: item.SuggestedDemandID, ProgressText: item.ProgressText,
-			ProgressDedupeKey: item.ProgressDedupeKey,
+			ProgressDedupeKey: progressDedupeKey(message, item.SuggestedDemandID),
 			Source:            canonicalSource(message, item.Source.Excerpt),
 			Links:             progressLinksForMessage(message, resources),
 			Confidence:        item.Confidence, Rationale: item.Rationale})
@@ -210,7 +245,7 @@ func (w *Worker) runWindow(ctx context.Context, trigger string, start, end time.
 
 func chunkAnalysisBatches(batches []AnalysisInput, candidateLimit int) [][]AnalysisInput {
 	if candidateLimit <= 0 {
-		candidateLimit = 40
+		candidateLimit = maxCandidatesPerCodexRequest
 	}
 	normalized := make([]AnalysisInput, 0, len(batches))
 	for _, batch := range batches {
@@ -268,6 +303,23 @@ func mergeAnalysisResult(destination *Result, source Result) {
 	destination.InputTokens += source.InputTokens
 	destination.CachedInputTokens += source.CachedInputTokens
 	destination.OutputTokens += source.OutputTokens
+	if source.AnalyzerRoute != "" {
+		destination.AnalyzerRoute = source.AnalyzerRoute
+	}
+	hadAnalyzerProfile := destination.AnalyzerProfileID != ""
+	if source.AnalyzerProfileID != "" {
+		destination.AnalyzerProfileID = source.AnalyzerProfileID
+		destination.AnalyzerProfileFingerprint = source.AnalyzerProfileFingerprint
+		if hadAnalyzerProfile {
+			destination.AnalyzerHealthy = destination.AnalyzerHealthy && source.AnalyzerHealthy
+		} else {
+			destination.AnalyzerHealthy = source.AnalyzerHealthy
+		}
+	}
+	destination.FallbackUsed = destination.FallbackUsed || source.FallbackUsed
+	if source.PrimaryError != "" {
+		destination.PrimaryError = source.PrimaryError
+	}
 }
 
 func buildAnalysisBatches(start, end time.Time, messages, candidates []Message, snapshot Snapshot, resources []Resource) []AnalysisInput {
@@ -374,10 +426,30 @@ func canonicalSource(message Message, excerpt string) model.Source {
 		content = message.Content
 	}
 	content = truncateRunes(content, 240)
-	return model.Source{Kind: "feishu-im", ExternalID: message.ID, ChatID: message.ChatID,
+	kind := normalizedSourceKind(message)
+	return model.Source{Kind: kind, ExternalID: message.ID, ChatID: message.ChatID,
 		ChatName: message.ChatName, SenderID: message.SenderID, SenderName: message.SenderName,
 		MessageTime: message.CreatedAt, URL: message.URL, Excerpt: content,
-		DedupeKey: "feishu-im:" + message.ID + ":0", CreatedAt: time.Now().UTC()}
+		DedupeKey: kind + ":" + message.ID + ":0", CreatedAt: time.Now().UTC()}
+}
+
+func normalizedSourceKind(message Message) string {
+	kind := strings.TrimSpace(message.SourceKind)
+	if kind == "" {
+		return "feishu-im"
+	}
+	return kind
+}
+
+func progressDedupeKey(message Message, demandID string) string {
+	prefix := "feishu-progress"
+	switch normalizedSourceKind(message) {
+	case "codex-conversation":
+		prefix = "codex-progress"
+	case "claude-conversation":
+		prefix = "claude-progress"
+	}
+	return prefix + ":" + message.ID + ":" + demandID
 }
 
 func resourceSource(resource Resource) model.Source {
@@ -393,10 +465,15 @@ func resourceSource(resource Resource) model.Source {
 }
 
 func progressLinksForMessage(message Message, resources []Resource) []model.ProgressLink {
-	links := make([]model.ProgressLink, 0, 1+len(resources))
+	links := append([]model.ProgressLink(nil), message.Links...)
 	if strings.TrimSpace(message.URL) != "" {
-		links = append(links, model.ProgressLink{Kind: "feishu-im", ExternalID: message.ID,
-			Title: "飞书原消息", URL: message.URL, DedupeKey: "feishu-im:" + message.ID})
+		kind := normalizedSourceKind(message)
+		title := "原始对话"
+		if kind == "feishu-im" {
+			title = "飞书原消息"
+		}
+		links = append(links, model.ProgressLink{Kind: kind, ExternalID: message.ID,
+			Title: title, URL: message.URL, DedupeKey: kind + ":" + message.ID})
 	}
 	for _, resource := range resourcesForMessage(message, resources) {
 		if strings.TrimSpace(resource.URL) == "" {
@@ -409,7 +486,27 @@ func progressLinksForMessage(message Message, resources []Resource) []model.Prog
 		links = append(links, model.ProgressLink{Kind: resource.Kind, ExternalID: resource.ExternalID,
 			Title: title, URL: resource.URL, State: resource.State, DedupeKey: resource.DedupeKey})
 	}
-	return links
+	return dedupeProgressLinksForWorker(links)
+}
+
+func dedupeProgressLinksForWorker(links []model.ProgressLink) []model.ProgressLink {
+	seen := make(map[string]struct{}, len(links))
+	result := make([]model.ProgressLink, 0, len(links))
+	for _, link := range links {
+		key := strings.TrimSpace(link.DedupeKey)
+		if key == "" {
+			key = strings.TrimSpace(link.URL)
+		}
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, link)
+	}
+	return result
 }
 
 func resourceLinkTitle(kind, externalID string) string {
@@ -522,23 +619,23 @@ func ingestionWindows(state model.FeishuIngestionState, now time.Time) ([][2]tim
 	var start time.Time
 	switch {
 	case state.LastSuccessEnd == nil:
-		start = end.Add(-7 * 24 * time.Hour)
+		start = end.Add(-maximumRecoveryLookback)
 		backfill = true
-	case end.Sub(state.LastSuccessEnd.UTC()) > 48*time.Hour:
+	case end.Sub(state.LastSuccessEnd.UTC()) > maximumRecoveryLookback:
 		start = state.LastSuccessEnd.UTC().Add(-time.Duration(state.OverlapMinutes) * time.Minute)
-		if earliest := end.Add(-7 * 24 * time.Hour); start.Before(earliest) {
+		if earliest := end.Add(-maximumRecoveryLookback); start.Before(earliest) {
 			start = earliest
 		}
 		backfill = true
 	case backfill && now.Hour() >= 9:
-		start = end.Add(-48 * time.Hour)
+		start = end.Add(-maximumRecoveryLookback)
 	default:
 		start = state.LastSuccessEnd.UTC().Add(-time.Duration(state.OverlapMinutes) * time.Minute)
 	}
 	if !start.Before(end) {
 		start = end.Add(-time.Duration(max(1, state.OverlapMinutes)) * time.Minute)
 	}
-	return splitWindows(start, end, 24*time.Hour), backfill
+	return splitWindows(start, end, recoveryWindowSize), backfill
 }
 
 func splitWindows(start, end time.Time, maximum time.Duration) [][2]time.Time {

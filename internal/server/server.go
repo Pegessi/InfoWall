@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/infowall/infowall/internal/conversationingest"
 	"github.com/infowall/infowall/internal/feed"
 	"github.com/infowall/infowall/internal/feishuingest"
 	"github.com/infowall/infowall/internal/feishusync"
@@ -41,6 +42,10 @@ type Config struct {
 	CodexPath          string
 	CodexCWD           string
 	CodexTimeout       time.Duration
+	ClaudePath         string
+	ClaudeHubTabsPath  string
+	ClaudeHubTabID     string
+	ClaudeTimeout      time.Duration
 }
 
 // Server wires together store, hub, and HTTP routes.
@@ -57,7 +62,10 @@ type Server struct {
 	syncWG       sync.WaitGroup
 }
 
-const defaultViewSettingKey = "default_view"
+const (
+	defaultViewSettingKey       = "default_view"
+	defaultIngestionLarkTimeout = 90 * time.Second
+)
 
 func normalizeDefaultView(value string) (string, error) {
 	value = strings.ToLower(strings.TrimSpace(value))
@@ -112,23 +120,32 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 		hub:   feed.NewHub(),
 		mux:   http.NewServeMux(),
 	}
-	runner := cfg.LarkRunner
-	if runner == nil {
-		runner = feishusync.ExecRunner{}
+	syncRunner := cfg.LarkRunner
+	if syncRunner == nil {
+		syncRunner = feishusync.ExecRunner{}
 	}
-	s.feishuClient = feishusync.Client{Runner: runner}
+	s.feishuClient = feishusync.Client{Runner: syncRunner}
 	s.syncWorker = feishusync.NewWorker(&feishuBackend{store: st}, s.feishuClient)
 	s.syncWorker.OnUpdate = s.broadcastFeishuSyncState
+	ingestionRunner := cfg.LarkRunner
+	if ingestionRunner == nil {
+		ingestionRunner = feishusync.ExecRunner{Timeout: defaultIngestionLarkTimeout}
+	}
 	collector := cfg.IngestionCollector
 	if collector == nil {
-		collector = feishuingest.LarkCollector{Runner: runner}
+		collector = feishuingest.LarkCollector{Runner: ingestionRunner}
 	}
 	analyzer := cfg.IngestionAnalyzer
 	if analyzer == nil {
-		analyzer = feishuingest.CodexAnalyzer{Path: cfg.CodexPath, CWD: cfg.CodexCWD, Timeout: cfg.CodexTimeout}
+		analyzer = feishuingest.FallbackAnalyzer{
+			Primary: feishuingest.ClaudeDay1Analyzer{Path: cfg.ClaudePath, HubTabsPath: cfg.ClaudeHubTabsPath,
+				HubTabID: cfg.ClaudeHubTabID, Timeout: cfg.ClaudeTimeout},
+			Fallback: feishuingest.CodexAnalyzer{Path: cfg.CodexPath, CWD: cfg.CodexCWD, Timeout: cfg.CodexTimeout},
+		}
 	}
 	s.ingestWorker = feishuingest.NewWorker(&ingestionBackend{store: st}, collector, analyzer)
-	s.ingestWorker.Enricher = feishuingest.CommandEnricher{LarkRunner: runner}
+	s.ingestWorker.Enricher = feishuingest.CommandEnricher{LarkRunner: ingestionRunner}
+	s.ingestWorker.LocalCollector = localConversationCollector{store: st, stateDir: conversationingest.DefaultStateDir()}
 	s.ingestWorker.OnUpdate = s.broadcastFeishuIngestionState
 	workerContext := ctx
 	if workerContext == nil {
@@ -190,6 +207,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PATCH /api/integrations/feishu-chat", api(s.handlePatchFeishuChat))
 	s.mux.HandleFunc("POST /api/integrations/feishu-chat/scan", api(s.handleScanFeishuChat))
 	s.mux.HandleFunc("GET /api/integrations/feishu-chat/runs", api(s.handleListFeishuChatRuns))
+	s.mux.HandleFunc("POST /api/integrations/conversations/events", api(s.handlePutConversationHookEvent))
+	// Unified aliases keep the original Feishu CLI/API contract compatible.
+	s.mux.HandleFunc("GET /api/integrations/activity", api(s.handleGetFeishuChat))
+	s.mux.HandleFunc("PATCH /api/integrations/activity", api(s.handlePatchFeishuChat))
+	s.mux.HandleFunc("POST /api/integrations/activity/scan", api(s.handleScanFeishuChat))
+	s.mux.HandleFunc("GET /api/integrations/activity/runs", api(s.handleListFeishuChatRuns))
 	s.mux.HandleFunc("GET /api/demand-reviews", api(s.handleListDemandReviews))
 	s.mux.HandleFunc("POST /api/demand-reviews/{id}/accept", api(s.handleAcceptDemandReview))
 	s.mux.HandleFunc("POST /api/demand-reviews/{id}/dismiss", api(s.handleDismissDemandReview))

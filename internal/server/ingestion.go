@@ -8,10 +8,47 @@ import (
 	"strings"
 	"time"
 
+	"github.com/infowall/infowall/internal/conversationingest"
 	"github.com/infowall/infowall/internal/feishuingest"
 	"github.com/infowall/infowall/internal/model"
 	"github.com/infowall/infowall/internal/store"
 )
+
+type localConversationCollector struct {
+	store    *store.Store
+	stateDir string
+}
+
+func (collector localConversationCollector) CollectLocal(ctx context.Context, end time.Time) (feishuingest.LocalCollection, error) {
+	_, err := conversationingest.DrainSpool(ctx, collector.stateDir,
+		func(ctx context.Context, event model.ConversationHookEvent) error {
+			_, err := collector.store.PutConversationHookEvent(ctx, event)
+			return err
+		})
+	if err != nil {
+		return feishuingest.LocalCollection{}, err
+	}
+	turns, err := collector.store.ListPendingConversationTurns(ctx, end)
+	if err != nil {
+		return feishuingest.LocalCollection{}, err
+	}
+	result := feishuingest.LocalCollection{Messages: make([]feishuingest.Message, 0, len(turns)), Seen: len(turns)}
+	for _, turn := range turns {
+		kind, label := "codex-conversation", "Codex 对话"
+		if turn.Source == "claude" {
+			kind, label = "claude-conversation", "Claude 对话"
+		}
+		content := strings.TrimSpace("用户目标：" + turn.Prompt + "\n最终结果：" + turn.Result)
+		result.Messages = append(result.Messages, feishuingest.Message{
+			ID: turn.ID, ChatID: turn.SessionID, ChatName: label, ChatType: "p2p",
+			SenderType: "user", SenderName: "当前用户", MessageType: "agent-turn",
+			Content: content, URL: turn.URL, CreatedAt: turn.OccurredAt, SourceKind: kind,
+			SessionID: turn.SessionID, TurnID: turn.TurnID, CWD: turn.CWD, Links: turn.Links,
+		})
+		result.HookEventIDs = append(result.HookEventIDs, turn.HookEventIDs...)
+	}
+	return result, nil
+}
 
 type ingestionBackend struct {
 	store *store.Store
@@ -137,6 +174,7 @@ func (s *Server) handlePatchFeishuChat(w http.ResponseWriter, r *http.Request) {
 		s.ingestWorker.Wake()
 	}
 	s.broadcast("feishu_ingestion.updated", updated)
+	s.broadcast("activity_ingestion.updated", updated)
 	writeJSON(w, http.StatusOK, updated)
 }
 
@@ -148,6 +186,7 @@ func (s *Server) handleScanFeishuChat(w http.ResponseWriter, r *http.Request) {
 	}
 	s.ingestWorker.Wake()
 	s.broadcast("feishu_ingestion.updated", state)
+	s.broadcast("activity_ingestion.updated", state)
 	writeJSON(w, http.StatusAccepted, state)
 }
 
@@ -168,6 +207,21 @@ func (s *Server) handleListDemandReviews(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"reviews": reviews})
+}
+
+func (s *Server) handlePutConversationHookEvent(w http.ResponseWriter, r *http.Request) {
+	var event model.ConversationHookEvent
+	if err := decodeJSON(r, &event); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	created, err := s.store.PutConversationHookEvent(r.Context(), event)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	s.broadcast("conversation_ingestion.queued", map[string]any{"source": event.Source, "created": created})
+	writeJSON(w, http.StatusAccepted, map[string]any{"accepted": true, "created": created, "id": event.ID})
 }
 
 func (s *Server) handleAcceptDemandReview(w http.ResponseWriter, r *http.Request) {
@@ -216,6 +270,7 @@ func (s *Server) broadcastFeishuIngestionState() {
 	defer cancel()
 	if state, err := s.store.GetFeishuIngestionState(ctx); err == nil {
 		s.broadcast("feishu_ingestion.updated", state)
+		s.broadcast("activity_ingestion.updated", state)
 	}
 	if reviews, err := s.store.ListDemandReviews(ctx, "pending"); err == nil {
 		s.broadcast("demand_review.updated", map[string]any{"count": len(reviews)})

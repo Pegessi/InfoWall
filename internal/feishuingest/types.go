@@ -10,20 +10,25 @@ import (
 const MessageLimit = 2000
 
 type Message struct {
-	ID          string    `json:"message_id"`
-	ChatID      string    `json:"chat_id"`
-	ChatName    string    `json:"chat_name"`
-	ChatType    string    `json:"chat_type,omitempty"`
-	ThreadID    string    `json:"thread_id,omitempty"`
-	SenderID    string    `json:"sender_id"`
-	SenderName  string    `json:"sender_name"`
-	SenderType  string    `json:"sender_type"`
-	MessageType string    `json:"message_type"`
-	Content     string    `json:"content"`
-	URL         string    `json:"url,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	Deleted     bool      `json:"deleted"`
-	Mentions    []Mention `json:"mentions,omitempty"`
+	ID          string               `json:"message_id"`
+	ChatID      string               `json:"chat_id"`
+	ChatName    string               `json:"chat_name"`
+	ChatType    string               `json:"chat_type,omitempty"`
+	ThreadID    string               `json:"thread_id,omitempty"`
+	SenderID    string               `json:"sender_id"`
+	SenderName  string               `json:"sender_name"`
+	SenderType  string               `json:"sender_type"`
+	MessageType string               `json:"message_type"`
+	Content     string               `json:"content"`
+	URL         string               `json:"url,omitempty"`
+	CreatedAt   time.Time            `json:"created_at"`
+	Deleted     bool                 `json:"deleted"`
+	Mentions    []Mention            `json:"mentions,omitempty"`
+	SourceKind  string               `json:"source_kind,omitempty"`
+	SessionID   string               `json:"session_id,omitempty"`
+	TurnID      string               `json:"turn_id,omitempty"`
+	CWD         string               `json:"cwd,omitempty"`
+	Links       []model.ProgressLink `json:"links,omitempty"`
 }
 
 // Mention is the stable identity-bearing part of an @mention returned by
@@ -101,14 +106,20 @@ type Review struct {
 }
 
 type Result struct {
-	NewDemands        []NewDemand      `json:"new_demands"`
-	ProgressUpdates   []ProgressUpdate `json:"progress_updates"`
-	Reviews           []Review         `json:"reviews"`
-	SkippedMessageIDs []string         `json:"skipped_message_ids"`
-	MissingContextIDs []string         `json:"missing_context_message_ids"`
-	InputTokens       int64            `json:"input_tokens,omitempty"`
-	CachedInputTokens int64            `json:"cached_input_tokens,omitempty"`
-	OutputTokens      int64            `json:"output_tokens,omitempty"`
+	NewDemands                 []NewDemand      `json:"new_demands"`
+	ProgressUpdates            []ProgressUpdate `json:"progress_updates"`
+	Reviews                    []Review         `json:"reviews"`
+	SkippedMessageIDs          []string         `json:"skipped_message_ids"`
+	MissingContextIDs          []string         `json:"missing_context_message_ids"`
+	InputTokens                int64            `json:"input_tokens,omitempty"`
+	CachedInputTokens          int64            `json:"cached_input_tokens,omitempty"`
+	OutputTokens               int64            `json:"output_tokens,omitempty"`
+	AnalyzerRoute              string           `json:"-"`
+	AnalyzerProfileID          string           `json:"-"`
+	AnalyzerProfileFingerprint string           `json:"-"`
+	AnalyzerHealthy            bool             `json:"-"`
+	FallbackUsed               bool             `json:"-"`
+	PrimaryError               string           `json:"-"`
 }
 
 type Analyzer interface {
@@ -121,4 +132,18 @@ type Collector interface {
 
 type Enricher interface {
 	Enrich(context.Context, []Message) []Resource
+}
+
+// LocalCollection contains completed local agent turns waiting for the same
+// reconciliation pipeline as Feishu candidates.
+type LocalCollection struct {
+	Messages     []Message
+	HookEventIDs []string
+	Seen         int
+}
+
+// LocalCollector imports local hook spools and returns completed Codex/Claude
+// turns. Remote Claude Hub agents are deliberately outside this interface.
+type LocalCollector interface {
+	CollectLocal(context.Context, time.Time) (LocalCollection, error)
 }

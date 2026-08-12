@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -38,16 +39,23 @@ func (r ExecRunner) Run(ctx context.Context, stdin string, args ...string) ([]by
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(runCtx, path, args...)
+	cmd := exec.Command(path, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-			return nil, fmt.Errorf("lark-cli timed out after %s", timeout)
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start lark-cli: %w", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err == nil {
+			return stdout.Bytes(), nil
 		}
 		message := strings.TrimSpace(stderr.String())
 		if len(message) > 4096 {
@@ -57,8 +65,14 @@ func (r ExecRunner) Run(ctx context.Context, stdin string, args ...string) ([]by
 			message = err.Error()
 		}
 		return nil, fmt.Errorf("lark-cli %s failed: %s", strings.Join(args[:min(2, len(args))], " "), message)
+	case <-runCtx.Done():
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-done
+		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("lark-cli timed out after %s", timeout)
+		}
+		return nil, runCtx.Err()
 	}
-	return stdout.Bytes(), nil
 }
 
 type Client struct {

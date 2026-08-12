@@ -15,6 +15,15 @@ type fakeCollector struct {
 	err    error
 }
 
+type fakeLocalCollector struct {
+	result LocalCollection
+	err    error
+}
+
+func (collector fakeLocalCollector) CollectLocal(context.Context, time.Time) (LocalCollection, error) {
+	return collector.result, collector.err
+}
+
 func (collector fakeCollector) Collect(context.Context, time.Time, time.Time, []string) (Collection, error) {
 	return collector.result, collector.err
 }
@@ -85,6 +94,26 @@ func TestWorkerDoesNotStartCodexWithoutNewHumanMessages(t *testing.T) {
 	}
 }
 
+func TestWorkerCountsLocalSourcesAndCommitsHookIDs(t *testing.T) {
+	codexTurn := Message{ID: "codex-turn", SourceKind: "codex-conversation", SenderType: "user", Content: "目标和结果"}
+	claudeTurn := Message{ID: "claude-turn", SourceKind: "claude-conversation", SenderType: "user", Content: "目标和结果"}
+	backend := &fakeBackend{newIDs: map[string]bool{"codex-turn": true, "claude-turn": true}}
+	analyzer := &fakeAnalyzer{result: Result{MissingContextIDs: []string{"codex-turn", "claude-turn"}, AnalyzerRoute: "claude-day1"}}
+	worker := NewWorker(backend, fakeCollector{}, analyzer)
+	worker.LocalCollector = fakeLocalCollector{result: LocalCollection{Messages: []Message{codexTurn, claudeTurn},
+		HookEventIDs: []string{"prompt-1", "stop-1", "prompt-2", "stop-2"}, Seen: 2}}
+	if err := worker.runWindow(context.Background(), "manual", time.Now().Add(-time.Hour), time.Now(), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if analyzer.calls != 1 || len(backend.completed) != 1 {
+		t.Fatalf("calls=%d commits=%+v", analyzer.calls, backend.completed)
+	}
+	commit := backend.completed[0]
+	if commit.FeishuCandidates != 0 || commit.CodexCandidates != 1 || commit.ClaudeCandidates != 1 || len(commit.ProcessedHookEventIDs) != 4 || commit.AnalyzerRoute != "claude-day1" {
+		t.Fatalf("unified commit = %+v", commit)
+	}
+}
+
 func TestWorkerDoesNotStartCodexForUnrelatedGroupTraffic(t *testing.T) {
 	messages := []Message{{ID: "noise", ChatID: "large-group", ChatType: "group",
 		SenderID: "ou_other", SenderType: "user", Content: "另一个团队的普通讨论"}}
@@ -145,10 +174,17 @@ func TestIngestionWindowsBackfillRecoveryAndSchedule(t *testing.T) {
 	now := time.Date(2026, 8, 9, 9, 0, 0, 0, location)
 	state := model.FeishuIngestionState{ActiveStart: "09:00", ActiveEnd: "23:00", IntervalMinutes: 30, OverlapMinutes: 5}
 	windows, backfill := ingestionWindows(state, now)
-	if !backfill || len(windows) != 7 || windows[0][0] != now.UTC().Add(-7*24*time.Hour) || windows[len(windows)-1][1] != now.UTC() {
+	if !backfill || len(windows) != 1 || windows[0][0] != now.UTC().Add(-12*time.Hour) || windows[0][1].Sub(windows[0][0]) != recoveryWindowSize || windows[len(windows)-1][1] != now.UTC() {
 		t.Fatalf("first-run recovery windows = %+v backfill=%v", windows, backfill)
 	}
 	last := now.Add(-30 * time.Minute).UTC()
+	previousDay := now.Add(-24 * time.Hour)
+	state.LastSuccessEnd = &last
+	state.LastBackfillAt = &previousDay
+	windows, backfill = ingestionWindows(state, now)
+	if !backfill || len(windows) != 1 || windows[0][0] != now.UTC().Add(-12*time.Hour) || windows[0][1].Sub(windows[0][0]) != recoveryWindowSize || windows[len(windows)-1][1] != now.UTC() {
+		t.Fatalf("daily catch-up windows = %+v backfill=%v", windows, backfill)
+	}
 	backfillAt := now.Add(-time.Hour)
 	state.LastSuccessEnd = &last
 	state.LastBackfillAt = &backfillAt
@@ -214,6 +250,32 @@ func TestAnalysisBatchesSplitLargeConversationAndRespectCandidateLimit(t *testin
 	}
 	if total != len(messages) {
 		t.Fatalf("candidate total = %d", total)
+	}
+}
+
+func TestProductionAnalysisBatchLimitKeepsDenseWindowsBounded(t *testing.T) {
+	start := time.Now().Add(-time.Hour)
+	messages := make([]Message, 36)
+	for index := range messages {
+		messages[index] = Message{ID: uuid.NewString(), ChatID: "chat-a", CreatedAt: start.Add(time.Duration(index) * time.Second)}
+	}
+	requests := chunkAnalysisBatches([]AnalysisInput{{
+		WindowStart: start,
+		WindowEnd:   time.Now(),
+		Messages:    messages,
+		Candidates:  messages,
+	}}, maxCandidatesPerCodexRequest)
+	if len(requests) != 3 {
+		t.Fatalf("request count = %d", len(requests))
+	}
+	for _, request := range requests {
+		count := 0
+		for _, batch := range request {
+			count += len(batch.Candidates)
+		}
+		if count > maxCandidatesPerCodexRequest {
+			t.Fatalf("candidate count = %d", count)
+		}
 	}
 }
 

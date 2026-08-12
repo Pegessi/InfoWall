@@ -3,8 +3,12 @@ package feishusync
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 type scriptedRunner struct {
@@ -26,6 +30,26 @@ func (r *scriptedRunner) Run(_ context.Context, stdin string, args ...string) ([
 
 func envelope(id, url, content string, revision int) []byte {
 	return []byte(fmt.Sprintf(`{"ok":true,"data":{"document":{"document_id":%q,"url":%q,"revision_id":%d,"content":%q}}}`, id, url, revision, content))
+}
+
+func TestExecRunnerTimeoutKillsProcessGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are Unix-specific")
+	}
+	directory := t.TempDir()
+	script := filepath.Join(directory, "fake-lark-cli")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 60 &\nwait\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := ExecRunner{Path: script, Timeout: 100 * time.Millisecond}
+	started := time.Now()
+	_, err := runner.Run(context.Background(), "", "im", "+messages-search")
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("timeout error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("process group was not terminated promptly: %s", elapsed)
+	}
 }
 
 func TestSyncManagedSectionRefetchesAndCleansStaleBlocks(t *testing.T) {

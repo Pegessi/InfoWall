@@ -83,6 +83,49 @@ The repository also contains the Codex skill at
 on demand, retains only demand evidence, and imports candidates through the
 running local service.
 
+### Automatic activity ingestion
+
+InfoWall can reconcile Feishu messages and completed local Codex/Claude turns
+every 30 minutes from 09:00 through 23:00 in `Asia/Shanghai`. Each source uses
+a persisted success watermark with a five-minute overlap; first enablement or
+recovery reads at most the latest 12 hours. An empty increment never starts a
+model.
+
+Install the local lifecycle hooks once, then enable the built-in scheduler:
+
+```bash
+./bin/infowall hooks install --bin "$(pwd)/bin/infowall" --server http://127.0.0.1:8899 --json
+./bin/infowall hooks status --json
+./bin/infowall scan activity setup --json
+./bin/infowall scan activity status --json
+./bin/infowall scan activity now --json
+./bin/infowall scan activity runs --json
+```
+
+`scan feishu` remains a compatibility alias for `scan activity`. The hook
+installer merges `UserPromptSubmit` and `Stop` into existing Codex and Claude
+settings, never replaces unrelated hooks, and returns within one second. If
+the service is unavailable, compact events are written with mode `0600` below
+`~/.infowall/spool/conversations` and are deleted after import or 24 hours.
+Codex requires the user to trust newly configured hooks from `/hooks`; a
+configured but untrusted hook does not run.
+
+Only the user goal, final assistant result, local session/turn identity,
+working directory, and direct URLs are retained. Tool logs, reasoning, ANSI
+terminal output, and full transcripts are excluded. The summary runner reads
+file-backed bounded inputs with only `Read`/`Glob`; local Codex and Claude
+events may update existing demands or enter review, but cannot create demands.
+
+For its primary analyzer, InfoWall reads one existing **local** Claude day1
+tab from `~/.claude_hub/tabs.json` and launches its own ephemeral restricted
+Claude Code process. It does not modify Claude Hub, call a Hub API, install
+anything into Hub, or inspect remote-agent transcripts. Only the selected tab
+ID, a one-way configuration fingerprint, and health are stored; credentials
+remain process-local. If day1 fails twice, InfoWall uses the same temporary
+files with Codex and exposes the fallback plus input/cache/output token counts
+in the workbench. Pin a specific local tab with `serve --claude-day1-tab ID`
+when auto-detection is ambiguous.
+
 The browser groups same-topic items into topic panels by default: links, notes,
 papers, images, and charts each get their own fixed-height panel with the
 newest items first and an internal scroll area. Use the stack/columns layout

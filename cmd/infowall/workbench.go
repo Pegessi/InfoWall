@@ -17,7 +17,7 @@ const (
 	demandsPath           = "/api/demands"
 	projectsPath          = "/api/projects"
 	feishuIntegrationPath = "/api/integrations/feishu-doc"
-	feishuChatPath        = "/api/integrations/feishu-chat"
+	activityPath          = "/api/integrations/activity"
 	demandReviewsPath     = "/api/demand-reviews"
 )
 
@@ -569,19 +569,19 @@ func cmdSyncFeishuSimple(command, method, path string, args []string) error {
 	return requestAndPrint(cfg, method, path, nil)
 }
 
-// --- scan feishu ---
+// --- scan unified activity ("feishu" remains a compatibility alias) ---
 
 func cmdScan(args []string) error {
-	if len(args) < 2 || args[0] != "feishu" {
-		return errors.New("usage: infowall scan feishu <setup|status|now|runs|disable> [flags]")
+	if len(args) < 2 || (args[0] != "feishu" && args[0] != "activity") {
+		return errors.New("usage: infowall scan activity <setup|status|now|runs|disable> [flags]")
 	}
 	switch args[1] {
 	case "setup":
 		return cmdScanFeishuSetup(args[2:])
 	case "status":
-		return cmdScanFeishuSimple("status", http.MethodGet, feishuChatPath, args[2:])
+		return cmdScanFeishuSimple("status", http.MethodGet, activityPath, args[2:])
 	case "now":
-		return cmdScanFeishuSimple("now", http.MethodPost, feishuChatPath+"/scan", args[2:])
+		return cmdScanFeishuSimple("now", http.MethodPost, activityPath+"/scan", args[2:])
 	case "runs":
 		return cmdScanFeishuRuns(args[2:])
 	case "disable":
@@ -590,21 +590,22 @@ func cmdScan(args []string) error {
 		printScanFeishuUsage()
 		return nil
 	default:
-		return fmt.Errorf("unknown scan feishu subcommand %q", args[1])
+		return fmt.Errorf("unknown scan activity subcommand %q", args[1])
 	}
 }
 
 func printScanFeishuUsage() {
-	fmt.Println(`infowall scan feishu — incrementally collect demand evidence from visible chats
+	fmt.Println(`infowall scan activity — incrementally collect demand evidence from Feishu and local agent conversations
 
 Usage:
-  infowall scan feishu setup [--exclude-chat CHAT_ID ...] [client flags]
-  infowall scan feishu status [client flags]
-  infowall scan feishu now [client flags]
-  infowall scan feishu runs [--limit N] [client flags]
-  infowall scan feishu disable [client flags]
+  infowall scan activity setup [--exclude-chat CHAT_ID ...] [client flags]
+  infowall scan activity status [client flags]
+  infowall scan activity now [client flags]
+  infowall scan activity runs [--limit N] [client flags]
+  infowall scan activity disable [client flags]
 
 The default schedule is Asia/Shanghai 09:00–23:00 every 30 minutes with a 5-minute overlap.
+Local Codex and Claude turns may only update existing demands or enter review; only Feishu may create pending demands.
 Direct chats are eligible; group/topic messages are analyzed only when sent by you, explicitly @mentioning you,
 or in a thread where you participated. The current Feishu identity is resolved automatically from lark-cli auth status.
 Use --resume-from RFC3339 only once when a prior manual scan has an audited completion watermark.
@@ -638,7 +639,7 @@ func cmdScanFeishuSetup(args []string) error {
 		"active_end": *end, "interval_minutes": *interval, "overlap_minutes": *overlap,
 		"excluded_chat_ids": []string(exclusions)}
 	putNonEmpty(payload, "resume_from", *resumeFrom)
-	return requestAndPrint(cfg, http.MethodPatch, feishuChatPath, payload)
+	return requestAndPrint(cfg, http.MethodPatch, activityPath, payload)
 }
 
 func cmdScanFeishuSimple(command, method, path string, args []string) error {
@@ -659,7 +660,7 @@ func cmdScanFeishuRuns(args []string) error {
 	if fs.NArg() != 0 {
 		return cfg.fail(errors.New("usage: infowall scan feishu runs [--limit N] [client flags]"))
 	}
-	return requestAndPrint(cfg, http.MethodGet, feishuChatPath+"/runs?limit="+url.QueryEscape(fmt.Sprint(*limit)), nil)
+	return requestAndPrint(cfg, http.MethodGet, activityPath+"/runs?limit="+url.QueryEscape(fmt.Sprint(*limit)), nil)
 }
 
 func cmdScanFeishuDisable(args []string) error {
@@ -669,7 +670,7 @@ func cmdScanFeishuDisable(args []string) error {
 	if fs.NArg() != 0 {
 		return cfg.fail(errors.New("usage: infowall scan feishu disable [client flags]"))
 	}
-	return requestAndPrint(cfg, http.MethodPatch, feishuChatPath, map[string]any{"enabled": false})
+	return requestAndPrint(cfg, http.MethodPatch, activityPath, map[string]any{"enabled": false})
 }
 
 // --- shared workbench client helpers ---

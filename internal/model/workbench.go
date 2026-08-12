@@ -136,43 +136,59 @@ type FeishuSyncState struct {
 }
 
 type FeishuIngestionState struct {
-	Enabled         bool       `json:"enabled"`
-	Timezone        string     `json:"timezone"`
-	ActiveStart     string     `json:"active_start"`
-	ActiveEnd       string     `json:"active_end"`
-	IntervalMinutes int        `json:"interval_minutes"`
-	OverlapMinutes  int        `json:"overlap_minutes"`
-	ExcludedChatIDs []string   `json:"excluded_chat_ids"`
-	LastSuccessEnd  *time.Time `json:"last_success_end"`
-	LastBackfillAt  *time.Time `json:"last_backfill_at"`
-	NextRunAt       *time.Time `json:"next_run_at"`
-	Status          string     `json:"status"`
-	LastError       string     `json:"last_error,omitempty"`
-	CurrentRunID    string     `json:"current_run_id,omitempty"`
-	LeaseUntil      *time.Time `json:"lease_until"`
-	Requested       bool       `json:"requested"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	Enabled                    bool                  `json:"enabled"`
+	Timezone                   string                `json:"timezone"`
+	ActiveStart                string                `json:"active_start"`
+	ActiveEnd                  string                `json:"active_end"`
+	IntervalMinutes            int                   `json:"interval_minutes"`
+	OverlapMinutes             int                   `json:"overlap_minutes"`
+	ExcludedChatIDs            []string              `json:"excluded_chat_ids"`
+	LastSuccessEnd             *time.Time            `json:"last_success_end"`
+	LastBackfillAt             *time.Time            `json:"last_backfill_at"`
+	NextRunAt                  *time.Time            `json:"next_run_at"`
+	Status                     string                `json:"status"`
+	LastError                  string                `json:"last_error,omitempty"`
+	CurrentRunID               string                `json:"current_run_id,omitempty"`
+	LeaseUntil                 *time.Time            `json:"lease_until"`
+	Requested                  bool                  `json:"requested"`
+	AnalyzerRoute              string                `json:"analyzer_route,omitempty"`
+	AnalyzerProfileID          string                `json:"analyzer_profile_id,omitempty"`
+	AnalyzerProfileFingerprint string                `json:"analyzer_profile_fingerprint,omitempty"`
+	AnalyzerHealthy            bool                  `json:"analyzer_healthy"`
+	FallbackActive             bool                  `json:"fallback_active"`
+	LastPrimaryError           string                `json:"last_primary_error,omitempty"`
+	SourceWatermarks           map[string]*time.Time `json:"source_watermarks,omitempty"`
+	UpdatedAt                  time.Time             `json:"updated_at"`
 }
 
 type FeishuIngestionRun struct {
-	ID                  string     `json:"id"`
-	Trigger             string     `json:"trigger"`
-	Status              string     `json:"status"`
-	WindowStart         time.Time  `json:"window_start"`
-	WindowEnd           time.Time  `json:"window_end"`
-	MessagesSeen        int        `json:"messages_seen"`
-	MessagesCandidate   int        `json:"messages_candidate"`
-	Created             int        `json:"created"`
-	Updated             int        `json:"updated"`
-	Skipped             int        `json:"skipped"`
-	ReviewCount         int        `json:"review_count"`
-	MissingContextCount int        `json:"missing_context_count"`
-	InputTokens         int64      `json:"input_tokens"`
-	CachedInputTokens   int64      `json:"cached_input_tokens"`
-	OutputTokens        int64      `json:"output_tokens"`
-	StartedAt           time.Time  `json:"started_at"`
-	FinishedAt          *time.Time `json:"finished_at"`
-	Error               string     `json:"error,omitempty"`
+	ID                         string     `json:"id"`
+	Trigger                    string     `json:"trigger"`
+	Status                     string     `json:"status"`
+	WindowStart                time.Time  `json:"window_start"`
+	WindowEnd                  time.Time  `json:"window_end"`
+	MessagesSeen               int        `json:"messages_seen"`
+	MessagesCandidate          int        `json:"messages_candidate"`
+	Created                    int        `json:"created"`
+	Updated                    int        `json:"updated"`
+	Skipped                    int        `json:"skipped"`
+	ReviewCount                int        `json:"review_count"`
+	MissingContextCount        int        `json:"missing_context_count"`
+	InputTokens                int64      `json:"input_tokens"`
+	CachedInputTokens          int64      `json:"cached_input_tokens"`
+	OutputTokens               int64      `json:"output_tokens"`
+	FeishuCandidates           int        `json:"feishu_candidates"`
+	CodexCandidates            int        `json:"codex_candidates"`
+	ClaudeCandidates           int        `json:"claude_candidates"`
+	AnalyzerRoute              string     `json:"analyzer_route,omitempty"`
+	AnalyzerProfileID          string     `json:"analyzer_profile_id,omitempty"`
+	AnalyzerProfileFingerprint string     `json:"analyzer_profile_fingerprint,omitempty"`
+	AnalyzerHealthy            bool       `json:"analyzer_healthy"`
+	FallbackUsed               bool       `json:"fallback_used"`
+	PrimaryError               string     `json:"primary_error,omitempty"`
+	StartedAt                  time.Time  `json:"started_at"`
+	FinishedAt                 *time.Time `json:"finished_at"`
+	Error                      string     `json:"error,omitempty"`
 }
 
 type DemandReview struct {
@@ -204,18 +220,63 @@ type DemandProgressUpdate struct {
 }
 
 type FeishuIngestionCommit struct {
-	RunID               string                 `json:"run_id"`
-	WindowEnd           time.Time              `json:"window_end"`
-	BackfillAt          *time.Time             `json:"backfill_at,omitempty"`
-	MessagesSeen        int                    `json:"messages_seen"`
-	MessagesCandidate   int                    `json:"messages_candidate"`
-	NewDemands          []*Demand              `json:"new_demands"`
-	ProgressUpdates     []DemandProgressUpdate `json:"progress_updates"`
-	Reviews             []DemandReview         `json:"reviews"`
-	ProcessedMessageIDs []string               `json:"processed_message_ids"`
-	Skipped             int                    `json:"skipped"`
-	MissingContextCount int                    `json:"missing_context_count"`
-	InputTokens         int64                  `json:"input_tokens"`
-	CachedInputTokens   int64                  `json:"cached_input_tokens"`
-	OutputTokens        int64                  `json:"output_tokens"`
+	RunID                      string                 `json:"run_id"`
+	WindowEnd                  time.Time              `json:"window_end"`
+	BackfillAt                 *time.Time             `json:"backfill_at,omitempty"`
+	MessagesSeen               int                    `json:"messages_seen"`
+	MessagesCandidate          int                    `json:"messages_candidate"`
+	NewDemands                 []*Demand              `json:"new_demands"`
+	ProgressUpdates            []DemandProgressUpdate `json:"progress_updates"`
+	Reviews                    []DemandReview         `json:"reviews"`
+	ProcessedMessageIDs        []string               `json:"processed_message_ids"`
+	ProcessedHookEventIDs      []string               `json:"processed_hook_event_ids,omitempty"`
+	Skipped                    int                    `json:"skipped"`
+	MissingContextCount        int                    `json:"missing_context_count"`
+	InputTokens                int64                  `json:"input_tokens"`
+	CachedInputTokens          int64                  `json:"cached_input_tokens"`
+	OutputTokens               int64                  `json:"output_tokens"`
+	FeishuCandidates           int                    `json:"feishu_candidates"`
+	CodexCandidates            int                    `json:"codex_candidates"`
+	ClaudeCandidates           int                    `json:"claude_candidates"`
+	AnalyzerRoute              string                 `json:"analyzer_route,omitempty"`
+	AnalyzerProfileID          string                 `json:"analyzer_profile_id,omitempty"`
+	AnalyzerProfileFingerprint string                 `json:"analyzer_profile_fingerprint,omitempty"`
+	AnalyzerHealthy            bool                   `json:"analyzer_healthy"`
+	FallbackUsed               bool                   `json:"fallback_used"`
+	PrimaryError               string                 `json:"primary_error,omitempty"`
+}
+
+// ConversationHookEvent is the compact, retry-safe envelope written by local
+// Codex and Claude lifecycle hooks. Prompt/result bodies are cleared after a
+// successful ingestion commit; only demand evidence remains long-term.
+type ConversationHookEvent struct {
+	ID             string         `json:"id"`
+	Source         string         `json:"source"`
+	EventName      string         `json:"event_name"`
+	SessionID      string         `json:"session_id"`
+	TurnID         string         `json:"turn_id,omitempty"`
+	CWD            string         `json:"cwd,omitempty"`
+	URL            string         `json:"url,omitempty"`
+	Prompt         string         `json:"prompt,omitempty"`
+	Result         string         `json:"result,omitempty"`
+	TranscriptPath string         `json:"transcript_path,omitempty"`
+	Links          []ProgressLink `json:"links,omitempty"`
+	OccurredAt     time.Time      `json:"occurred_at"`
+	ReceivedAt     time.Time      `json:"received_at,omitempty"`
+}
+
+// ConversationTurn is a paired user-goal/final-result candidate assembled
+// from hook events. HookEventIDs are committed atomically with demand updates.
+type ConversationTurn struct {
+	ID           string
+	Source       string
+	SessionID    string
+	TurnID       string
+	CWD          string
+	URL          string
+	Prompt       string
+	Result       string
+	Links        []ProgressLink
+	OccurredAt   time.Time
+	HookEventIDs []string
 }

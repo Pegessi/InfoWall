@@ -26,7 +26,7 @@ type Store struct {
 // introduced report user_version = 0 and are structurally identical to v1, so
 // migrating 0 -> 1 only stamps the version (no data change). Bump this and add a
 // case in migrate() when the schema changes in a future release.
-const schemaVersion = 5
+const schemaVersion = 6
 
 const schema = `
 CREATE TABLE IF NOT EXISTS items (
@@ -204,6 +204,53 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_demand_reviews_progress_dedupe
     ON demand_reviews(progress_dedupe_key) WHERE progress_dedupe_key <> '';
 `
 
+const unifiedIngestionSchema = `
+ALTER TABLE feishu_ingestion_state ADD COLUMN analyzer_route TEXT NOT NULL DEFAULT '';
+ALTER TABLE feishu_ingestion_state ADD COLUMN analyzer_profile_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE feishu_ingestion_state ADD COLUMN analyzer_profile_fingerprint TEXT NOT NULL DEFAULT '';
+ALTER TABLE feishu_ingestion_state ADD COLUMN analyzer_healthy INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE feishu_ingestion_state ADD COLUMN fallback_active INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE feishu_ingestion_state ADD COLUMN last_primary_error TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE feishu_ingestion_runs ADD COLUMN feishu_candidates INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE feishu_ingestion_runs ADD COLUMN codex_candidates INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE feishu_ingestion_runs ADD COLUMN claude_candidates INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE feishu_ingestion_runs ADD COLUMN analyzer_route TEXT NOT NULL DEFAULT '';
+ALTER TABLE feishu_ingestion_runs ADD COLUMN analyzer_profile_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE feishu_ingestion_runs ADD COLUMN analyzer_profile_fingerprint TEXT NOT NULL DEFAULT '';
+ALTER TABLE feishu_ingestion_runs ADD COLUMN analyzer_healthy INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE feishu_ingestion_runs ADD COLUMN fallback_used INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE feishu_ingestion_runs ADD COLUMN primary_error TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS conversation_source_state (
+    source           TEXT PRIMARY KEY CHECK (source IN ('feishu', 'codex', 'claude')),
+    last_success_end DATETIME,
+    updated_at       DATETIME NOT NULL
+);
+INSERT OR IGNORE INTO conversation_source_state (source, updated_at) VALUES ('feishu', CURRENT_TIMESTAMP);
+INSERT OR IGNORE INTO conversation_source_state (source, updated_at) VALUES ('codex', CURRENT_TIMESTAMP);
+INSERT OR IGNORE INTO conversation_source_state (source, updated_at) VALUES ('claude', CURRENT_TIMESTAMP);
+
+CREATE TABLE IF NOT EXISTS conversation_hook_events (
+    id              TEXT PRIMARY KEY,
+    source          TEXT NOT NULL CHECK (source IN ('codex', 'claude')),
+    event_name      TEXT NOT NULL CHECK (event_name IN ('UserPromptSubmit', 'Stop')),
+    session_id      TEXT NOT NULL,
+    turn_id         TEXT NOT NULL DEFAULT '',
+	    cwd             TEXT NOT NULL DEFAULT '',
+	    url             TEXT NOT NULL DEFAULT '',
+	    prompt          TEXT NOT NULL DEFAULT '',
+    result          TEXT NOT NULL DEFAULT '',
+    transcript_path TEXT NOT NULL DEFAULT '',
+    links_json      TEXT NOT NULL DEFAULT '[]',
+    occurred_at     DATETIME NOT NULL,
+    received_at     DATETIME NOT NULL,
+    processed_at    DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_hook_pending
+    ON conversation_hook_events(processed_at, occurred_at, source, session_id);
+`
+
 // SQLite time formats we accept when scanning. modernc.org/sqlite serializes
 // time.Time as RFC3339Nano by default, but we also accept the Go stdlib
 // "2006-01-02 15:04:05" form in case rows were inserted by other tooling.
@@ -313,6 +360,14 @@ func migrateStep(db *sql.DB, from int) error {
 		// progress entries and backfill them from existing evidence URLs.
 		if err := migrateProgressLinks(db); err != nil {
 			return fmt.Errorf("apply demand progress links schema: %w", err)
+		}
+		return nil
+	case 5:
+		// 5 -> 6: extend the existing ingestion scheduler with local Codex and
+		// Claude hook events, per-source watermarks, analyzer routing and usage
+		// audit. Existing Feishu state and run history remain intact.
+		if _, err := db.Exec(unifiedIngestionSchema); err != nil {
+			return fmt.Errorf("apply unified conversation ingestion schema: %w", err)
 		}
 		return nil
 	default:

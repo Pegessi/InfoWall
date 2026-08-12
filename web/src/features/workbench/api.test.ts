@@ -96,16 +96,16 @@ describe("updateProject", () => {
 describe("automatic ingestion normalization", () => {
   it("preserves state, run stats, token usage, and structured review evidence", async () => {
     const responses = [
-      { enabled: true, timezone: "Asia/Shanghai", active_start: "09:00", active_end: "23:00", interval_minutes: 30, overlap_minutes: 5, excluded_chat_ids: ["oc_skip"], last_success_end: "2026-08-09T10:00:00Z", next_run_at: "2026-08-09T10:30:00Z", status: "idle" },
-      { runs: [{ id: "run-1", trigger: "manual", status: "success", window_start: "2026-08-09T09:55:00Z", window_end: "2026-08-09T10:00:00Z", messages_seen: 4, messages_candidate: 1, created: 1, updated: 0, skipped: 3, review_count: 0, input_tokens: 1234, cached_input_tokens: 1000, output_tokens: 120, started_at: "2026-08-09T10:00:00Z" }] },
+      { enabled: true, timezone: "Asia/Shanghai", active_start: "09:00", active_end: "23:00", interval_minutes: 30, overlap_minutes: 5, excluded_chat_ids: ["oc_skip"], last_success_end: "2026-08-09T10:00:00Z", next_run_at: "2026-08-09T10:30:00Z", status: "idle", analyzer_route: "codex", analyzer_profile_id: "local-day1", analyzer_profile_fingerprint: "abc123", analyzer_healthy: false, fallback_active: true, last_primary_error: "day1 unavailable", source_watermarks: { codex: "2026-08-09T10:00:00Z" } },
+      { runs: [{ id: "run-1", trigger: "manual", status: "success", window_start: "2026-08-09T09:55:00Z", window_end: "2026-08-09T10:00:00Z", messages_seen: 4, messages_candidate: 3, created: 1, updated: 1, skipped: 1, review_count: 0, input_tokens: 1234, cached_input_tokens: 1000, output_tokens: 120, feishu_candidates: 1, codex_candidates: 1, claude_candidates: 1, analyzer_route: "codex", analyzer_profile_id: "local-day1", analyzer_profile_fingerprint: "abc123", analyzer_healthy: false, fallback_used: true, primary_error: "day1 unavailable", started_at: "2026-08-09T10:00:00Z" }] },
       { reviews: [{ id: "review-1", status: "pending", suggested_demand_id: "demand-1", progress_text: "完成灰度", progress_dedupe_key: "feishu-progress:om_1:demand-1", confidence: 0.7, created_at: "2026-08-09T10:00:00Z", source: { kind: "feishu-im", external_id: "om_1", sender_name: "请求人", excerpt: "完成灰度" }, links: [{ kind: "feishu-im", title: "飞书原消息", url: "https://example.test/message/om_1" }] }] },
     ];
     vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => ({ ok: true, json: async () => responses.shift() })));
     const state = await fetchFeishuChatIntegration();
     const runs = await fetchFeishuIngestionRuns();
     const reviews = await fetchDemandReviews();
-    expect(state).toEqual(expect.objectContaining({ enabled: true, activeStart: "09:00", intervalMinutes: 30, excludedChatIds: ["oc_skip"] }));
-    expect(runs[0]).toEqual(expect.objectContaining({ messagesCandidate: 1, inputTokens: 1234, outputTokens: 120 }));
+    expect(state).toEqual(expect.objectContaining({ enabled: true, activeStart: "09:00", intervalMinutes: 30, excludedChatIds: ["oc_skip"], analyzerRoute: "codex", analyzerProfileId: "local-day1", analyzerProfileFingerprint: "abc123", analyzerHealthy: false, fallbackActive: true, sourceWatermarks: { codex: "2026-08-09T10:00:00Z" } }));
+    expect(runs[0]).toEqual(expect.objectContaining({ messagesCandidate: 3, inputTokens: 1234, outputTokens: 120, feishuCandidates: 1, codexCandidates: 1, claudeCandidates: 1, analyzerRoute: "codex", analyzerProfileId: "local-day1", analyzerHealthy: false, fallbackUsed: true }));
     expect(reviews[0]).toEqual(expect.objectContaining({ suggestedDemandId: "demand-1", progressText: "完成灰度" }));
     expect(reviews[0].source).toEqual(expect.objectContaining({ externalId: "om_1", senderName: "请求人", excerpt: "完成灰度" }));
     expect(reviews[0].links[0]).toEqual(expect.objectContaining({ title: "飞书原消息", url: "https://example.test/message/om_1" }));

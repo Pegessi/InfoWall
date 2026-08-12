@@ -216,7 +216,7 @@ function SyncBar({ integration, busy, onSync }: { integration: FeishuDocIntegrat
   );
 }
 
-function IngestionBar({ integration, latestRun, busy, onScan }: {
+export function IngestionBar({ integration, latestRun, busy, onScan }: {
   integration: FeishuChatIntegration | null;
   latestRun?: FeishuIngestionRun;
   busy: boolean;
@@ -226,6 +226,13 @@ function IngestionBar({ integration, latestRun, busy, onScan }: {
   const failed = integration?.status === "error";
   const enabled = Boolean(integration?.enabled);
   const status = !enabled ? "未启用" : failed ? "采集失败" : running ? "采集中" : "自动采集";
+  const route = latestRun?.analyzerRoute ?? integration?.analyzerRoute;
+  const fallback = Boolean(latestRun?.fallbackUsed || integration?.fallbackActive);
+  const analyzerLabel = route === "codex" ? "Codex（回退）" : route === "claude-day1" ? "Claude day1" : "待首次分析";
+  const primaryError = latestRun?.primaryError ?? integration?.lastPrimaryError;
+  const analyzerProfileId = latestRun?.analyzerProfileId ?? integration?.analyzerProfileId;
+  const analyzerProfileFingerprint = latestRun?.analyzerProfileFingerprint ?? integration?.analyzerProfileFingerprint;
+  const analyzerHealthy = latestRun?.analyzerHealthy ?? integration?.analyzerHealthy;
   return (
     <div className="mb-4 flex flex-col gap-3 rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 py-3 sm:mb-6 sm:flex-row sm:items-center sm:justify-between sm:px-4">
       <div className="flex min-w-0 items-start gap-3">
@@ -234,16 +241,20 @@ function IngestionBar({ integration, latestRun, busy, onScan }: {
         </div>
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
-            飞书聊天增量采集
+            统一进展采集
             <span className={`rounded-full px-2 py-0.5 text-[10px] ${failed ? "bg-red-500/10 text-red-600" : running ? "bg-violet-500/10 text-violet-600" : enabled ? "bg-emerald-500/10 text-emerald-600" : "bg-zinc-500/10 text-zinc-500"}`}>{status}</span>
           </div>
           <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[hsl(var(--muted-foreground))]">
             {enabled && <span>{integration?.activeStart}–{integration?.activeEnd} · 每 {integration?.intervalMinutes} 分钟</span>}
-            {enabled && <span title="群聊仅保留我发送、明确 @我，或我参与线程中的消息">范围：私聊 + 与我有关的群聊</span>}
+            {enabled && <span title="飞书群聊仅保留我发送、明确 @我，或我参与线程中的消息；本地对话只保留目标和最终结果">来源：飞书 + Codex + 本地 Claude</span>}
             <span>最近成功：{formatDate(integration?.lastSuccessEnd)}</span>
             {enabled && <span>下次：{formatDate(integration?.nextRunAt)}</span>}
             {latestRun?.status === "success" && <span>上轮：新建 {latestRun.created} · 更新 {latestRun.updated} · 审核 {latestRun.reviewCount} · 跳过 {latestRun.skipped}</span>}
-            {latestRun && latestRun.inputTokens > 0 && <span>Token：{latestRun.inputTokens.toLocaleString()} in / {latestRun.outputTokens.toLocaleString()} out</span>}
+            {latestRun && <span>事件：飞书 {latestRun.feishuCandidates} · Codex {latestRun.codexCandidates} · Claude {latestRun.claudeCandidates}</span>}
+            {enabled && <span>分析器：{analyzerLabel}</span>}
+            {enabled && analyzerProfileId && <span title={`本地配置 ${analyzerProfileId} · 指纹 ${analyzerProfileFingerprint ?? "未知"}`}>day1 配置：{analyzerHealthy ? "正常" : "不可用"}</span>}
+            {latestRun && latestRun.inputTokens > 0 && <span>Token：{latestRun.inputTokens.toLocaleString()} 输入 · {latestRun.cachedInputTokens.toLocaleString()} 缓存 · {latestRun.outputTokens.toLocaleString()} 输出</span>}
+            {fallback && <span className="basis-full rounded-md bg-amber-500/10 px-2 py-1 text-amber-700 dark:text-amber-400">day1 不可用，正在使用 Codex{primaryError ? `：${primaryError}` : ""}</span>}
             {integration?.lastError && <span className="basis-full break-words text-red-500">{integration.lastError}</span>}
           </div>
         </div>

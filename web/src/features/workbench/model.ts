@@ -73,7 +73,7 @@ export interface FeishuDocIntegration {
   lastError?: string;
 }
 
-export interface FeishuChatIntegration {
+export interface ActivityIntegration {
   enabled: boolean;
   timezone: string;
   activeStart: string;
@@ -85,9 +85,18 @@ export interface FeishuChatIntegration {
   nextRunAt?: string;
   status: string;
   lastError?: string;
+  analyzerRoute?: string;
+  analyzerProfileId?: string;
+  analyzerProfileFingerprint?: string;
+  analyzerHealthy: boolean;
+  fallbackActive: boolean;
+  lastPrimaryError?: string;
+  sourceWatermarks: Record<string, string>;
 }
 
-export interface FeishuIngestionRun {
+export type FeishuChatIntegration = ActivityIntegration;
+
+export interface ActivityIngestionRun {
   id: string;
   status: string;
   trigger: string;
@@ -102,10 +111,21 @@ export interface FeishuIngestionRun {
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
+  feishuCandidates: number;
+  codexCandidates: number;
+  claudeCandidates: number;
+  analyzerRoute?: string;
+  analyzerProfileId?: string;
+  analyzerProfileFingerprint?: string;
+  analyzerHealthy: boolean;
+  fallbackUsed: boolean;
+  primaryError?: string;
   startedAt: string;
   finishedAt?: string;
   error?: string;
 }
+
+export type FeishuIngestionRun = ActivityIngestionRun;
 
 export interface DemandReview {
   id: string;

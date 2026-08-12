@@ -68,6 +68,120 @@ func TestFeishuIngestionCommitIsTransactionalAndRetrySafe(t *testing.T) {
 	}
 }
 
+func TestConversationHooksPairDeduplicateAndClearBodiesWithWatermarks(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	enableIngestion(t, st)
+	when := time.Now().UTC().Truncate(time.Second)
+	prompt := model.ConversationHookEvent{ID: "prompt-1", Source: "codex", EventName: "UserPromptSubmit",
+		SessionID: "session-1", TurnID: "turn-1", CWD: "/tmp/project", Prompt: "修复服务异常",
+		Links: []model.ProgressLink{{URL: "https://example.test/mr/1", DedupeKey: "mr:1"}}, OccurredAt: when.Add(-time.Second)}
+	stop := model.ConversationHookEvent{ID: "stop-1", Source: "codex", EventName: "Stop",
+		SessionID: "session-1", TurnID: "turn-1", Result: "已完成修复并验证",
+		Links: []model.ProgressLink{{URL: "https://example.test/mr/1", DedupeKey: "mr:1"}}, OccurredAt: when}
+	for _, event := range []model.ConversationHookEvent{prompt, stop, stop} {
+		if _, err := st.PutConversationHookEvent(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	turns, err := st.ListPendingConversationTurns(ctx, when.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 || turns[0].Prompt != prompt.Prompt || turns[0].Result != stop.Result || len(turns[0].Links) != 1 {
+		t.Fatalf("turns = %+v", turns)
+	}
+	run, err := st.StartFeishuIngestionRun(ctx, "manual", when.Add(-time.Hour), when, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CompleteFeishuIngestion(ctx, model.FeishuIngestionCommit{RunID: run.ID, WindowEnd: when,
+		ProcessedMessageIDs: []string{turns[0].ID}, ProcessedHookEventIDs: turns[0].HookEventIDs,
+		CodexCandidates: 1, AnalyzerRoute: "claude-day1", AnalyzerProfileID: "local-day1",
+		AnalyzerProfileFingerprint: "abc123", AnalyzerHealthy: true}); err != nil {
+		t.Fatal(err)
+	}
+	turns, err = st.ListPendingConversationTurns(ctx, when.Add(time.Minute))
+	if err != nil || len(turns) != 0 {
+		t.Fatalf("processed turns = %+v err=%v", turns, err)
+	}
+	var promptBody, resultBody, transcriptPath, eventURL, linksJSON string
+	if err := st.db.QueryRowContext(ctx, `SELECT prompt, result, transcript_path, url, links_json FROM conversation_hook_events WHERE id = ?`, stop.ID).
+		Scan(&promptBody, &resultBody, &transcriptPath, &eventURL, &linksJSON); err != nil {
+		t.Fatal(err)
+	}
+	if promptBody != "" || resultBody != "" || transcriptPath != "" || eventURL != "" || linksJSON != "[]" {
+		t.Fatalf("processed body was retained: prompt=%q result=%q transcript=%q url=%q links=%q", promptBody, resultBody, transcriptPath, eventURL, linksJSON)
+	}
+	state, err := st.GetFeishuIngestionState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.AnalyzerProfileID != "local-day1" || state.AnalyzerProfileFingerprint != "abc123" || !state.AnalyzerHealthy {
+		t.Fatalf("analyzer profile status = %+v", state)
+	}
+	for _, source := range []string{"feishu", "codex", "claude"} {
+		watermark := state.SourceWatermarks[source]
+		if watermark == nil || !watermark.Equal(when) {
+			t.Fatalf("%s watermark = %v", source, watermark)
+		}
+	}
+	run2, err := st.StartFeishuIngestionRun(ctx, "manual", when, when.Add(time.Minute), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CompleteFeishuIngestion(ctx, model.FeishuIngestionCommit{RunID: run2.ID, WindowEnd: when.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	state, err = st.GetFeishuIngestionState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.AnalyzerRoute != "claude-day1" || state.AnalyzerProfileID != "local-day1" || !state.AnalyzerHealthy {
+		t.Fatalf("empty increment cleared analyzer state: %+v", state)
+	}
+}
+
+func TestConversationStopWithoutUserGoalStaysPending(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	when := time.Now().UTC()
+	_, err := st.PutConversationHookEvent(ctx, model.ConversationHookEvent{ID: "stop-orphan", Source: "claude",
+		EventName: "Stop", SessionID: "session-1", TurnID: "turn-1", Result: "tool-only result", OccurredAt: when})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turns, err := st.ListPendingConversationTurns(ctx, when.Add(time.Second))
+	if err != nil || len(turns) != 0 {
+		t.Fatalf("orphan stop became evidence: %+v err=%v", turns, err)
+	}
+}
+
+func TestAbandonedConversationHookBodiesExpireAfter24Hours(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	end := time.Now().UTC()
+	event := model.ConversationHookEvent{ID: "old-prompt", Source: "codex", EventName: "UserPromptSubmit",
+		SessionID: "session-old", TurnID: "turn-old", Prompt: "private abandoned goal", URL: "https://example.test/private",
+		Links: []model.ProgressLink{{URL: "https://example.test/private", DedupeKey: "private"}}, OccurredAt: end.Add(-25 * time.Hour)}
+	if _, err := st.PutConversationHookEvent(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	turns, err := st.ListPendingConversationTurns(ctx, end)
+	if err != nil || len(turns) != 0 {
+		t.Fatalf("expired turns=%+v err=%v", turns, err)
+	}
+	var prompt, eventURL, links string
+	var processed any
+	if err := st.db.QueryRowContext(ctx, `SELECT prompt, url, links_json, processed_at FROM conversation_hook_events WHERE id = ?`, event.ID).
+		Scan(&prompt, &eventURL, &links, &processed); err != nil {
+		t.Fatal(err)
+	}
+	if prompt != "" || eventURL != "" || links != "[]" || optionalSQLiteTime(processed) == nil {
+		t.Fatalf("expired hook retained data: prompt=%q url=%q links=%q processed=%v", prompt, eventURL, links, processed)
+	}
+}
+
 func TestFeishuIngestionResumePointIsOneTime(t *testing.T) {
 	st := openTemp(t)
 	ctx := context.Background()

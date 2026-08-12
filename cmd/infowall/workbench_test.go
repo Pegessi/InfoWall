@@ -95,7 +95,7 @@ func TestScanFeishuSetupAndReviewAcceptCLI(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("review accept failed: %v stderr=%s", err, stderr)
 	}
-	if len(requests) != 2 || requests[0].method != http.MethodPatch || requests[0].path != "/api/integrations/feishu-chat" {
+	if len(requests) != 2 || requests[0].method != http.MethodPatch || requests[0].path != "/api/integrations/activity" {
 		t.Fatalf("unexpected setup request: %+v", requests)
 	}
 	if requests[0].body["enabled"] != true || requests[0].body["interval_minutes"] != float64(30) {

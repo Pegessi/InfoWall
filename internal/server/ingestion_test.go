@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/infowall/infowall/internal/feishuingest"
+	"github.com/infowall/infowall/internal/feishusync"
 	"github.com/infowall/infowall/internal/model"
 )
 
@@ -22,6 +23,26 @@ type noCallAnalyzer struct{}
 
 func (noCallAnalyzer) Analyze(context.Context, []feishuingest.AnalysisInput) (feishuingest.Result, error) {
 	return feishuingest.Result{}, nil
+}
+
+func TestProductionLarkRunnersUseIntegrationSpecificTimeouts(t *testing.T) {
+	srv, err := New(context.Background(), Config{DBPath: filepath.Join(t.TempDir(), "wall.db"), IngestionAnalyzer: noCallAnalyzer{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	syncRunner, ok := srv.feishuClient.Runner.(feishusync.ExecRunner)
+	if !ok || syncRunner.Timeout != 0 {
+		t.Fatalf("document sync runner = %#v", srv.feishuClient.Runner)
+	}
+	collector, ok := srv.ingestWorker.Collector.(feishuingest.LarkCollector)
+	if !ok {
+		t.Fatalf("ingestion collector = %#v", srv.ingestWorker.Collector)
+	}
+	ingestionRunner, ok := collector.Runner.(feishusync.ExecRunner)
+	if !ok || ingestionRunner.Timeout != defaultIngestionLarkTimeout {
+		t.Fatalf("ingestion runner = %#v", collector.Runner)
+	}
 }
 
 func TestFeishuChatIntegrationAndDemandReviewAPI(t *testing.T) {
@@ -43,6 +64,19 @@ func TestFeishuChatIntegrationAndDemandReviewAPI(t *testing.T) {
 		t.Fatalf("unexpected ingestion state: %+v", state)
 	}
 	requestJSON(t, http.MethodGet, httpSrv.URL+"/api/integrations/feishu-chat", nil, http.StatusOK, &state)
+	requestJSON(t, http.MethodGet, httpSrv.URL+"/api/integrations/activity", nil, http.StatusOK, &state)
+
+	hook := model.ConversationHookEvent{ID: "hook-1", Source: "codex", EventName: "UserPromptSubmit",
+		SessionID: "session-1", TurnID: "turn-1", Prompt: "修复动态热更新", OccurredAt: time.Now().UTC()}
+	var accepted map[string]any
+	requestJSON(t, http.MethodPost, httpSrv.URL+"/api/integrations/conversations/events", hook, http.StatusAccepted, &accepted)
+	if accepted["accepted"] != true || accepted["created"] != true {
+		t.Fatalf("hook response = %+v", accepted)
+	}
+	requestJSON(t, http.MethodPost, httpSrv.URL+"/api/integrations/conversations/events", hook, http.StatusAccepted, &accepted)
+	if accepted["created"] != false {
+		t.Fatalf("duplicate hook was created: %+v", accepted)
+	}
 
 	demand, err := srv.store.CreateDemand(context.Background(), &model.Demand{Title: "修复动态热更新", Sources: []model.Source{{Kind: "manual", DedupeKey: "manual:hot"}}})
 	if err != nil {
@@ -76,11 +110,11 @@ func TestFeishuChatIntegrationAndDemandReviewAPI(t *testing.T) {
 	if len(list.Reviews) != 1 {
 		t.Fatalf("review list = %+v", list.Reviews)
 	}
-	var accepted model.DemandReview
+	var acceptedReview model.DemandReview
 	requestJSON(t, http.MethodPost, httpSrv.URL+"/api/demand-reviews/"+list.Reviews[0].ID+"/accept",
-		map[string]any{"demand_id": demand.ID}, http.StatusOK, &accepted)
-	if accepted.Status != "accepted" {
-		t.Fatalf("accepted review = %+v", accepted)
+		map[string]any{"demand_id": demand.ID}, http.StatusOK, &acceptedReview)
+	if acceptedReview.Status != "accepted" {
+		t.Fatalf("accepted review = %+v", acceptedReview)
 	}
 
 	requestJSON(t, http.MethodPost, httpSrv.URL+"/api/integrations/feishu-chat/scan", nil, http.StatusAccepted, &state)
@@ -88,6 +122,7 @@ func TestFeishuChatIntegrationAndDemandReviewAPI(t *testing.T) {
 		Runs []model.FeishuIngestionRun `json:"runs"`
 	}
 	requestJSON(t, http.MethodGet, httpSrv.URL+"/api/integrations/feishu-chat/runs", nil, http.StatusOK, &runs)
+	requestJSON(t, http.MethodGet, httpSrv.URL+"/api/integrations/activity/runs", nil, http.StatusOK, &runs)
 	if len(runs.Runs) == 0 {
 		t.Fatal("expected ingestion run history")
 	}
