@@ -13,12 +13,12 @@ import (
 	"github.com/infowall/infowall/internal/model"
 )
 
-func TestAnalysisSchemaRestrictsEveryReturnedMessageID(t *testing.T) {
-	allowed := analysisMessageIDs([]AnalysisInput{{
+func TestAnalysisSchemaRestrictsEveryReturnedMessageIDToCandidates(t *testing.T) {
+	allowed := analysisCandidateMessageIDs([]AnalysisInput{{
 		Messages:   []Message{{ID: "om_context"}, {ID: "om_candidate"}},
 		Candidates: []Message{{ID: "om_candidate"}},
 	}})
-	if strings.Join(allowed, ",") != "om_candidate,om_context" {
+	if strings.Join(allowed, ",") != "om_candidate" {
 		t.Fatalf("allowed IDs = %v", allowed)
 	}
 	raw, err := analysisSchemaFor(allowed)
@@ -32,13 +32,44 @@ func TestAnalysisSchemaRestrictsEveryReturnedMessageID(t *testing.T) {
 	definitions := schema["$defs"].(map[string]any)
 	messageID := definitions["message_id"].(map[string]any)
 	enum := messageID["enum"].([]any)
-	if len(enum) != 2 || enum[0] != "om_candidate" || enum[1] != "om_context" {
+	if len(enum) != 1 || enum[0] != "om_candidate" {
 		t.Fatalf("message ID enum = %+v", enum)
 	}
 	source := definitions["source"].(map[string]any)
 	externalID := source["properties"].(map[string]any)["external_id"].(map[string]any)
 	if externalID["$ref"] != "#/$defs/message_id" {
 		t.Fatalf("source external_id is not allowlisted: %+v", externalID)
+	}
+}
+
+func TestAnalysisWorkspaceKeepsContextReadableButNotAllowedAsOutput(t *testing.T) {
+	directory := t.TempDir()
+	batches := []AnalysisInput{{
+		Messages:   []Message{{ID: "om_context", Content: "earlier context"}, {ID: "om_candidate", Content: "new update"}},
+		Candidates: []Message{{ID: "om_candidate", Content: "new update"}},
+	}}
+	allowed := analysisCandidateMessageIDs(batches)
+	workspace, err := writeAnalysisWorkspace(directory, batches, allowed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestRaw, err := os.ReadFile(workspace.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest analysisManifest
+	if err := json.Unmarshal(manifestRaw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(manifest.AllowedMessageIDs, ",") != "om_candidate" {
+		t.Fatalf("allowed IDs = %v", manifest.AllowedMessageIDs)
+	}
+	batchRaw, err := os.ReadFile(manifest.CandidateFiles[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(batchRaw), "om_context") || !strings.Contains(string(batchRaw), "earlier context") {
+		t.Fatalf("context message is not readable: %s", batchRaw)
 	}
 }
 
@@ -161,6 +192,51 @@ func TestDecodeAnalysisResultUsesServerOwnedEvidenceMetadata(t *testing.T) {
 	}
 	if len(result.NewDemands) != 1 || result.NewDemands[0].Sources[0].ExternalID != message.ID {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestDecodeAnalysisResultRejectsContextMessageAsOutcome(t *testing.T) {
+	contextMessage := Message{ID: "om_context", SenderType: "user", Content: "earlier context"}
+	candidate := Message{ID: "om_candidate", SenderType: "user", Content: "new update"}
+	batches := []AnalysisInput{{Messages: []Message{contextMessage, candidate}, Candidates: []Message{candidate}}}
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "new demand source",
+			raw:  `{"new_demands":[{"title":"修复部署失败","description":"部署失败，需要恢复。","next_action":"定位失败日志","project_hint":"Server","sources":[{"external_id":"om_context","excerpt":"earlier context"}]}],"progress_updates":[],"reviews":[],"skipped_message_ids":["om_candidate"],"missing_context_message_ids":[]}`,
+			want: "new_demands[0] source must be a new candidate message",
+		},
+		{
+			name: "progress source",
+			raw:  `{"new_demands":[],"progress_updates":[{"demand_id":"demand-1","text":"已完成修复。","dedupe_key":"progress-1","source":{"external_id":"om_context","excerpt":"earlier context"},"confidence":0.95,"anchors":["exact MR"]}],"reviews":[],"skipped_message_ids":["om_candidate"],"missing_context_message_ids":[]}`,
+			want: "progress_updates[0] source must be a new candidate message",
+		},
+		{
+			name: "review source",
+			raw:  `{"new_demands":[],"progress_updates":[],"reviews":[{"suggested_demand_id":"demand-1","progress_text":"可能已完成修复。","progress_dedupe_key":"review-1","source":{"external_id":"om_context","excerpt":"earlier context"},"confidence":0.6,"rationale":"关联不唯一"}],"skipped_message_ids":["om_candidate"],"missing_context_message_ids":[]}`,
+			want: "reviews[0] source must be a new candidate message",
+		},
+		{
+			name: "skipped context",
+			raw:  `{"new_demands":[],"progress_updates":[],"reviews":[],"skipped_message_ids":["om_context","om_candidate"],"missing_context_message_ids":[]}`,
+			want: "skipped_message_ids[0] source must be a new candidate message",
+		},
+		{
+			name: "missing context context",
+			raw:  `{"new_demands":[],"progress_updates":[],"reviews":[],"skipped_message_ids":["om_candidate"],"missing_context_message_ids":["om_context"]}`,
+			want: "missing_context_message_ids[0] source must be a new candidate message",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := decodeAnalysisResult([]byte(test.raw), batches)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

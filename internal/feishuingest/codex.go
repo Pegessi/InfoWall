@@ -30,7 +30,7 @@ func (a CodexAnalyzer) Analyze(ctx context.Context, batches []AnalysisInput) (Re
 	if candidateCount == 0 {
 		return Result{}, nil
 	}
-	allowedMessageIDs := analysisMessageIDs(batches)
+	allowedMessageIDs := analysisCandidateMessageIDs(batches)
 	schemaJSON, err := analysisSchemaFor(allowedMessageIDs)
 	if err != nil {
 		return Result{}, err
@@ -202,14 +202,12 @@ func marshalAnalysisInput(batches []AnalysisInput, allowedMessageIDs []string) (
 	})
 }
 
-func analysisMessageIDs(batches []AnalysisInput) []string {
+func analysisCandidateMessageIDs(batches []AnalysisInput) []string {
 	seen := make(map[string]struct{})
 	for _, batch := range batches {
-		for _, messages := range [][]Message{batch.Messages, batch.Candidates} {
-			for _, message := range messages {
-				if id := strings.TrimSpace(message.ID); id != "" {
-					seen[id] = struct{}{}
-				}
+		for _, message := range batch.Candidates {
+			if id := strings.TrimSpace(message.ID); id != "" {
+				seen[id] = struct{}{}
 			}
 		}
 	}
@@ -317,6 +315,15 @@ func validateResult(result Result, batches []AnalysisInput) error {
 		}
 		return nil
 	}
+	validateCandidateSource := func(sourceID string) error {
+		if err := validateSource(sourceID); err != nil {
+			return err
+		}
+		if _, candidate := candidateMessages[sourceID]; !candidate {
+			return errors.New("source must be a new candidate message")
+		}
+		return nil
+	}
 	for index, demand := range result.NewDemands {
 		if strings.TrimSpace(demand.Title) == "" || strings.TrimSpace(demand.Description) == "" || strings.TrimSpace(demand.NextAction) == "" {
 			return fmt.Errorf("new_demands[%d] requires title, description and next_action", index)
@@ -327,23 +334,16 @@ func validateResult(result Result, batches []AnalysisInput) error {
 		if len(demand.Sources) == 0 {
 			return fmt.Errorf("new_demands[%d] requires at least one source", index)
 		}
-		hasCandidateSource := false
 		for _, source := range demand.Sources {
 			if source.ExternalID == "" {
 				return fmt.Errorf("new_demands[%d] source must reference a Feishu message", index)
 			}
-			if err := validateSource(source.ExternalID); err != nil {
-				return err
-			}
-			if _, candidate := candidateMessages[source.ExternalID]; candidate {
-				hasCandidateSource = true
+			if err := validateCandidateSource(source.ExternalID); err != nil {
+				return fmt.Errorf("new_demands[%d] %w", index, err)
 			}
 			if message := knownMessages[source.ExternalID]; normalizedSourceKind(message) != "feishu-im" {
 				return fmt.Errorf("new_demands[%d] may only use Feishu sources", index)
 			}
-		}
-		if !hasCandidateSource {
-			return fmt.Errorf("new_demands[%d] must cite at least one new candidate message", index)
 		}
 	}
 	for index, update := range result.ProgressUpdates {
@@ -356,11 +356,8 @@ func validateResult(result Result, batches []AnalysisInput) error {
 		if update.Source.ExternalID == "" {
 			return fmt.Errorf("progress_updates[%d] source must reference a Feishu message", index)
 		}
-		if err := validateSource(update.Source.ExternalID); err != nil {
-			return err
-		}
-		if _, candidate := candidateMessages[update.Source.ExternalID]; !candidate {
-			return fmt.Errorf("progress_updates[%d] source must be a new candidate message", index)
+		if err := validateCandidateSource(update.Source.ExternalID); err != nil {
+			return fmt.Errorf("progress_updates[%d] %w", index, err)
 		}
 	}
 	for index, review := range result.Reviews {
@@ -370,16 +367,18 @@ func validateResult(result Result, batches []AnalysisInput) error {
 		if review.Source.ExternalID == "" {
 			return fmt.Errorf("reviews[%d] source must reference a Feishu message", index)
 		}
-		if err := validateSource(review.Source.ExternalID); err != nil {
-			return err
-		}
-		if _, candidate := candidateMessages[review.Source.ExternalID]; !candidate {
-			return fmt.Errorf("reviews[%d] source must be a new candidate message", index)
+		if err := validateCandidateSource(review.Source.ExternalID); err != nil {
+			return fmt.Errorf("reviews[%d] %w", index, err)
 		}
 	}
-	for _, id := range append(append([]string{}, result.SkippedMessageIDs...), result.MissingContextIDs...) {
-		if err := validateSource(id); err != nil {
-			return err
+	for index, id := range result.SkippedMessageIDs {
+		if err := validateCandidateSource(id); err != nil {
+			return fmt.Errorf("skipped_message_ids[%d] %w", index, err)
+		}
+	}
+	for index, id := range result.MissingContextIDs {
+		if err := validateCandidateSource(id); err != nil {
+			return fmt.Errorf("missing_context_message_ids[%d] %w", index, err)
 		}
 	}
 	for id := range candidateMessages {
@@ -440,7 +439,7 @@ The manifest contains conversation/thread batch files, compact existing demand f
 Rules:
 - A new demand must be a durable actionable need, not routine chatter. Title format: action + business object/component + concrete result/problem; IDs only at the end. Keep the title within 56 display characters (the hard schema limit is 80). Include background/current state/problem in description and one executable next_action. project_hint is a suggestion only.
 - Persist only minimum evidence. Return only external_id=message_id plus a short excerpt. InfoWall resolves sender/chat/time/url and creates the stable dedupe key; never invent or copy those fields.
-- Every returned external_id, skipped_message_id, and missing_context_message_id must be copied exactly from top-level allowed_message_ids. Never use IDs from existing_snapshot, linked resources, prose, or memory. The output schema enforces this allowlist.
+- Top-level allowed_message_ids contains only the current new candidate messages. Context messages in candidate files may be read to interpret a candidate, but must never be returned as a source, skipped ID, or missing-context ID. Every returned external_id, skipped_message_id, and missing_context_message_id must be copied exactly from allowed_message_ids. Never use IDs from existing_snapshot, linked resources, prose, or memory. The output schema enforces this allowlist.
 - linked_resources contains only metadata already read by InfoWall. Use it to identify the business subject and verified state; never access its URL yourself. Inaccessible resources have accessible=false, so rely on chat context or emit missing_context.
 - New demands never set project/status/priority: the service enforces pending + none + project_hint. Only source_kind=feishu-im may create a new demand. Codex and Claude conversation candidates may update an existing demand, enter review, or be skipped/missing-context, but must never appear in new_demands.
 - Existing demands may receive evidence/progress only. Never rewrite status, priority, project, title, description, or next action.

@@ -56,7 +56,7 @@ func (analyzer ClaudeDay1Analyzer) AnalyzerProfile() (string, string, error) {
 }
 
 func (analyzer ClaudeDay1Analyzer) Analyze(ctx context.Context, batches []AnalysisInput) (Result, error) {
-	if len(analysisMessageIDs(batches)) == 0 {
+	if len(analysisCandidateMessageIDs(batches)) == 0 {
 		return Result{}, nil
 	}
 	profile, err := loadClaudeDay1Profile(analyzer.HubTabsPath, analyzer.HubTabID)
@@ -72,7 +72,7 @@ func (analyzer ClaudeDay1Analyzer) Analyze(ctx context.Context, batches []Analys
 		return Result{}, err
 	}
 	defer os.RemoveAll(temporary)
-	allowed := analysisMessageIDs(batches)
+	allowed := analysisCandidateMessageIDs(batches)
 	workspace, err := writeAnalysisWorkspace(temporary, batches, allowed)
 	if err != nil {
 		return Result{}, err
