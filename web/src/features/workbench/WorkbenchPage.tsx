@@ -248,14 +248,14 @@ export function IngestionBar({ integration, latestRun, busy, onScan }: {
   const status = !enabled ? "未启用" : failed ? "采集失败" : running ? "采集中" : "自动采集";
   const route = latestRun?.analyzerRoute ?? integration?.analyzerRoute;
   const fallback = Boolean(latestRun?.fallbackUsed || integration?.fallbackActive);
-  const analyzerLabel = route === "codex" ? "Codex（回退）" : route === "claude-day1" ? "Claude day1" : "待首次分析";
+  const analyzerLabel = route === "codex" ? "Codex（回退）" : route === "claude-0821" || route === "claude-day1" ? "Claude 0821" : "待首次分析";
   const primaryError = latestRun?.primaryError ?? integration?.lastPrimaryError;
   const analyzerProfileId = latestRun?.analyzerProfileId ?? integration?.analyzerProfileId;
   const analyzerProfileFingerprint = latestRun?.analyzerProfileFingerprint ?? integration?.analyzerProfileFingerprint;
   const analyzerHealthy = latestRun?.analyzerHealthy ?? integration?.analyzerHealthy;
   const fallbackSummary = primaryError?.includes("invalid-json") || primaryError?.includes("strict schema")
-    ? "day1 输出格式异常，已回退 Codex"
-    : "day1 分析失败，已回退 Codex";
+    ? "0821 输出格式异常，已回退 Codex"
+    : "0821 分析失败，已回退 Codex";
   const hasTokenUsage = Boolean(latestRun && latestRun.inputTokens > 0);
   return (
     <section aria-label="统一进展采集" className="mb-4 rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 py-3 sm:mb-6 sm:px-4">
@@ -323,7 +323,7 @@ export function IngestionBar({ integration, latestRun, busy, onScan }: {
               <div className="grid gap-2 border-t border-current/10 px-2 py-2 text-[11px] leading-relaxed sm:grid-cols-3">
                 <div>
                   <div className="opacity-70">分析器</div>
-                  <div className="mt-0.5 text-[hsl(var(--foreground))]">{analyzerLabel} · day1 {analyzerHealthy ? "上轮正常" : fallback ? "上轮异常" : "待验证"}</div>
+                  <div className="mt-0.5 text-[hsl(var(--foreground))]">{analyzerLabel} · 0821 {analyzerHealthy ? "上轮正常" : fallback ? "上轮异常" : "待验证"}</div>
                 </div>
                 {hasTokenUsage && (
                   <div>

@@ -97,7 +97,7 @@ func TestConversationHooksPairDeduplicateAndClearBodiesWithWatermarks(t *testing
 	}
 	if _, err := st.CompleteFeishuIngestion(ctx, model.FeishuIngestionCommit{RunID: run.ID, WindowEnd: when,
 		ProcessedMessageIDs: []string{turns[0].ID}, ProcessedHookEventIDs: turns[0].HookEventIDs,
-		CodexCandidates: 1, AnalyzerRoute: "claude-day1", AnalyzerProfileID: "local-day1",
+		CodexCandidates: 1, AnalyzerRoute: "claude-0821", AnalyzerProfileID: "local-0821",
 		AnalyzerProfileFingerprint: "abc123", AnalyzerHealthy: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestConversationHooksPairDeduplicateAndClearBodiesWithWatermarks(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.AnalyzerProfileID != "local-day1" || state.AnalyzerProfileFingerprint != "abc123" || !state.AnalyzerHealthy {
+	if state.AnalyzerProfileID != "local-0821" || state.AnalyzerProfileFingerprint != "abc123" || !state.AnalyzerHealthy {
 		t.Fatalf("analyzer profile status = %+v", state)
 	}
 	for _, source := range []string{"feishu", "codex", "claude"} {
@@ -137,7 +137,7 @@ func TestConversationHooksPairDeduplicateAndClearBodiesWithWatermarks(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.AnalyzerRoute != "claude-day1" || state.AnalyzerProfileID != "local-day1" || !state.AnalyzerHealthy {
+	if state.AnalyzerRoute != "claude-0821" || state.AnalyzerProfileID != "local-0821" || !state.AnalyzerHealthy {
 		t.Fatalf("empty increment cleared analyzer state: %+v", state)
 	}
 }

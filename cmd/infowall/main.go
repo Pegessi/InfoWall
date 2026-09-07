@@ -186,8 +186,12 @@ func cmdServe(args []string) error {
 	defaultView := fs.String("default-view", envOr("INFOWALL_DEFAULT_VIEW", "workbench"), "default frontend: infowall or workbench")
 	claudePath := fs.String("claude-path", os.Getenv("INFOWALL_CLAUDE_PATH"), "Claude Code executable (auto-detected by default)")
 	claudeHubTabs := fs.String("claude-hub-tabs", os.Getenv("INFOWALL_CLAUDE_HUB_TABS"), "read-only Claude Hub tabs.json path")
-	claudeHubTabID := fs.String("claude-day1-tab", os.Getenv("INFOWALL_CLAUDE_DAY1_TAB_ID"), "local Claude Hub day1 tab ID (auto-detected by model when empty)")
+	claudeHubTabID := fs.String("claude-0821-tab", os.Getenv("INFOWALL_CLAUDE_0821_TAB_ID"), "local Claude Hub 0821 tab ID (auto-detected by model when empty)")
+	legacyClaudeHubTabID := fs.String("claude-day1-tab", os.Getenv("INFOWALL_CLAUDE_DAY1_TAB_ID"), "deprecated alias for --claude-0821-tab; selected tab must use 0821")
 	fs.Parse(args)
+	if strings.TrimSpace(*claudeHubTabID) == "" {
+		*claudeHubTabID = strings.TrimSpace(*legacyClaudeHubTabID)
+	}
 
 	ctx := context.Background()
 	s, err := server.New(ctx, server.Config{

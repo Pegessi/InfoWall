@@ -52,15 +52,15 @@ describe("IngestionBar", () => {
     const integration: FeishuChatIntegration = {
       enabled: true, timezone: "Asia/Shanghai", activeStart: "09:00", activeEnd: "23:00",
       intervalMinutes: 30, overlapMinutes: 5, excludedChatIds: [], status: "idle",
-      analyzerRoute: "codex", analyzerProfileId: "local-day1", analyzerProfileFingerprint: "abc123",
-      analyzerHealthy: false, fallbackActive: true, lastPrimaryError: "day1 unavailable", sourceWatermarks: {},
+	  analyzerRoute: "codex", analyzerProfileId: "local-0821", analyzerProfileFingerprint: "abc123",
+	  analyzerHealthy: false, fallbackActive: true, lastPrimaryError: "0821 unavailable", sourceWatermarks: {},
     };
     const latestRun: FeishuIngestionRun = {
       id: "run-1", status: "success", trigger: "scheduled", windowStart: "2026-08-12T01:00:00Z",
       windowEnd: "2026-08-12T01:30:00Z", messagesSeen: 6, messagesCandidate: 6, created: 0, updated: 2,
       skipped: 4, reviewCount: 0, inputTokens: 1200, cachedInputTokens: 900, outputTokens: 80,
       feishuCandidates: 2, codexCandidates: 3, claudeCandidates: 1, analyzerRoute: "codex", fallbackUsed: true,
-      analyzerProfileId: "local-day1", analyzerProfileFingerprint: "abc123", analyzerHealthy: false,
+	  analyzerProfileId: "local-0821", analyzerProfileFingerprint: "abc123", analyzerHealthy: false,
       primaryError: "decode analysis output (invalid-json): output does not match the strict schema", startedAt: "2026-08-12T01:30:00Z",
     };
     render(<IngestionBar integration={integration} latestRun={latestRun} busy={false} onScan={vi.fn()} />);
@@ -68,7 +68,7 @@ describe("IngestionBar", () => {
     expect(screen.getByText("统一进展采集")).toBeTruthy();
     expect(screen.getByText("飞书 2 · C 3 · Claude 1")).toBeTruthy();
     expect(screen.getAllByText("Codex（回退）").length).toBeGreaterThan(0);
-    const fallbackSummary = screen.getByText("day1 输出格式异常，已回退 Codex");
+	const fallbackSummary = screen.getByText("0821 输出格式异常，已回退 Codex");
     const details = fallbackSummary.closest("details");
     expect(details?.hasAttribute("open")).toBe(false);
 

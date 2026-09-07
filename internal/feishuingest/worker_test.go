@@ -98,7 +98,7 @@ func TestWorkerCountsLocalSourcesAndCommitsHookIDs(t *testing.T) {
 	codexTurn := Message{ID: "codex-turn", SourceKind: "codex-conversation", SenderType: "user", Content: "目标和结果"}
 	claudeTurn := Message{ID: "claude-turn", SourceKind: "claude-conversation", SenderType: "user", Content: "目标和结果"}
 	backend := &fakeBackend{newIDs: map[string]bool{"codex-turn": true, "claude-turn": true}}
-	analyzer := &fakeAnalyzer{result: Result{MissingContextIDs: []string{"codex-turn", "claude-turn"}, AnalyzerRoute: "claude-day1"}}
+	analyzer := &fakeAnalyzer{result: Result{MissingContextIDs: []string{"codex-turn", "claude-turn"}, AnalyzerRoute: "claude-0821"}}
 	worker := NewWorker(backend, fakeCollector{}, analyzer)
 	worker.LocalCollector = fakeLocalCollector{result: LocalCollection{Messages: []Message{codexTurn, claudeTurn},
 		HookEventIDs: []string{"prompt-1", "stop-1", "prompt-2", "stop-2"}, Seen: 2}}
@@ -109,7 +109,7 @@ func TestWorkerCountsLocalSourcesAndCommitsHookIDs(t *testing.T) {
 		t.Fatalf("calls=%d commits=%+v", analyzer.calls, backend.completed)
 	}
 	commit := backend.completed[0]
-	if commit.FeishuCandidates != 0 || commit.CodexCandidates != 1 || commit.ClaudeCandidates != 1 || len(commit.ProcessedHookEventIDs) != 4 || commit.AnalyzerRoute != "claude-day1" {
+	if commit.FeishuCandidates != 0 || commit.CodexCandidates != 1 || commit.ClaudeCandidates != 1 || len(commit.ProcessedHookEventIDs) != 4 || commit.AnalyzerRoute != "claude-0821" {
 		t.Fatalf("unified commit = %+v", commit)
 	}
 }

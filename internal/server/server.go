@@ -138,7 +138,7 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 	analyzer := cfg.IngestionAnalyzer
 	if analyzer == nil {
 		analyzer = feishuingest.FallbackAnalyzer{
-			Primary: feishuingest.ClaudeDay1Analyzer{Path: cfg.ClaudePath, HubTabsPath: cfg.ClaudeHubTabsPath,
+			Primary: feishuingest.Claude0821Analyzer{Path: cfg.ClaudePath, HubTabsPath: cfg.ClaudeHubTabsPath,
 				HubTabID: cfg.ClaudeHubTabID, Timeout: cfg.ClaudeTimeout},
 			Fallback: feishuingest.CodexAnalyzer{Path: cfg.CodexPath, CWD: cfg.CodexCWD, Timeout: cfg.CodexTimeout},
 		}

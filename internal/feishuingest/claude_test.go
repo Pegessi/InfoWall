@@ -22,18 +22,19 @@ func writeClaudeTabs(t *testing.T, path string, tabs []claudeHubTab) {
 	}
 }
 
-func TestLoadClaudeDay1ProfileUsesOnlyLocalClaudeTab(t *testing.T) {
+func TestLoadClaude0821ProfileUsesOnlyLocalClaude0821Tab(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tabs.json")
 	writeClaudeTabs(t, path, []claudeHubTab{
-		{ID: "remote", AgentType: "claude", Target: "remote", Env: map[string]string{"ANTHROPIC_MODEL": "auto_model/alwaysday1", "ANTHROPIC_AUTH_TOKEN": "remote-secret"}},
-		{ID: "local-codex", AgentType: "codex", Target: "local", Env: map[string]string{"ANTHROPIC_MODEL": "auto_model/alwaysday1", "ANTHROPIC_AUTH_TOKEN": "codex-secret"}},
-		{ID: "local-day1", AgentType: "claude", Target: "local", Env: map[string]string{"ANTHROPIC_MODEL": "auto_model/alwaysday1", "ANTHROPIC_AUTH_TOKEN": "local-secret", "UNRELATED_SECRET": "drop-me"}},
+		{ID: "remote-0821", AgentType: "claude", Target: "remote", Env: map[string]string{"ANTHROPIC_MODEL": "model_api/experimental_0821", "ANTHROPIC_AUTH_TOKEN": "remote-secret"}},
+		{ID: "local-codex-0821", AgentType: "codex", Target: "local", Env: map[string]string{"ANTHROPIC_MODEL": "model_api/experimental_0821", "ANTHROPIC_AUTH_TOKEN": "codex-secret"}},
+		{ID: "local-day1", AgentType: "claude", Target: "local", Env: map[string]string{"ANTHROPIC_MODEL": "auto_model/alwaysday1", "ANTHROPIC_AUTH_TOKEN": "day1-secret"}},
+		{ID: "local-0821", AgentType: "claude", Target: "local", Env: map[string]string{"ANTHROPIC_MODEL": "model_api/experimental_0821", "ANTHROPIC_AUTH_TOKEN": "local-secret", "UNRELATED_SECRET": "drop-me"}},
 	})
-	profile, err := loadClaudeDay1Profile(path, "")
+	profile, err := loadClaude0821Profile(path, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if profile.TabID != "local-day1" || profile.Model != "auto_model/alwaysday1" || len(profile.Fingerprint) != 16 {
+	if profile.TabID != "local-0821" || profile.Model != "model_api/experimental_0821" || len(profile.Fingerprint) != 16 {
 		t.Fatalf("profile = %+v", profile)
 	}
 	if profile.Env["UNRELATED_SECRET"] != "" || profile.Env["ANTHROPIC_AUTH_TOKEN"] != "local-secret" {
@@ -41,20 +42,31 @@ func TestLoadClaudeDay1ProfileUsesOnlyLocalClaudeTab(t *testing.T) {
 	}
 }
 
+func TestLoadClaude0821ProfileRejectsPinnedNon0821Tab(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tabs.json")
+	writeClaudeTabs(t, path, []claudeHubTab{{ID: "local-day1", AgentType: "claude", Target: "local", Env: map[string]string{
+		"ANTHROPIC_MODEL": "auto_model/alwaysday1", "ANTHROPIC_AUTH_TOKEN": "test-token",
+	}}})
+	_, err := loadClaude0821Profile(path, "local-day1")
+	if err == nil || !strings.Contains(err.Error(), "0821") {
+		t.Fatalf("expected 0821 profile rejection, got %v", err)
+	}
+}
+
 func TestClaudeProfileFingerprintDoesNotPersistCredentialMaterial(t *testing.T) {
-	first := profileFingerprint("day1", map[string]string{"ANTHROPIC_MODEL": "auto_model/alwaysday1", "ANTHROPIC_AUTH_TOKEN": "secret-a"})
-	second := profileFingerprint("day1", map[string]string{"ANTHROPIC_MODEL": "auto_model/alwaysday1", "ANTHROPIC_AUTH_TOKEN": "secret-b"})
+	first := profileFingerprint("0821", map[string]string{"ANTHROPIC_MODEL": "model_api/experimental_0821", "ANTHROPIC_AUTH_TOKEN": "secret-a"})
+	second := profileFingerprint("0821", map[string]string{"ANTHROPIC_MODEL": "model_api/experimental_0821", "ANTHROPIC_AUTH_TOKEN": "secret-b"})
 	if first != second || strings.Contains(first, "secret") {
 		t.Fatalf("credential value changed non-secret profile fingerprint: %q %q", first, second)
 	}
 }
 
-func TestClaudeDay1AnalyzerUsesFileBackedRestrictedEphemeralRun(t *testing.T) {
+func TestClaude0821AnalyzerUsesFileBackedRestrictedEphemeralRun(t *testing.T) {
 	directory := t.TempDir()
 	tabsPath := filepath.Join(directory, "tabs.json")
 	capturePath := filepath.Join(directory, "capture.txt")
-	writeClaudeTabs(t, tabsPath, []claudeHubTab{{ID: "day1", AgentType: "claude", Target: "local", Env: map[string]string{
-		"ANTHROPIC_MODEL": "auto_model/alwaysday1", "ANTHROPIC_AUTH_TOKEN": "test-token", "CLAUDE_CODE_TEST_CAPTURE": capturePath,
+	writeClaudeTabs(t, tabsPath, []claudeHubTab{{ID: "0821", AgentType: "claude", Target: "local", Env: map[string]string{
+		"ANTHROPIC_MODEL": "model_api/experimental_0821", "ANTHROPIC_AUTH_TOKEN": "test-token", "CLAUDE_CODE_TEST_CAPTURE": capturePath,
 	}}})
 	script := filepath.Join(directory, "fake-claude")
 	contents := `#!/bin/sh
@@ -66,13 +78,13 @@ printf '%s\n' '{"structured_output":{"new_demands":[],"progress_updates":[],"rev
 		t.Fatal(err)
 	}
 	message := Message{ID: "message-1", SourceKind: "codex-conversation", Content: "private final result"}
-	result, err := (ClaudeDay1Analyzer{Path: script, HubTabsPath: tabsPath}).Analyze(context.Background(), []AnalysisInput{
+	result, err := (Claude0821Analyzer{Path: script, HubTabsPath: tabsPath}).Analyze(context.Background(), []AnalysisInput{
 		{Messages: []Message{message}, Candidates: []Message{message}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.AnalyzerRoute != "claude-day1" || result.AnalyzerProfileID != "day1" ||
+	if result.AnalyzerRoute != "claude-0821" || result.AnalyzerProfileID != "0821" ||
 		len(result.AnalyzerProfileFingerprint) != 16 || !result.AnalyzerHealthy ||
 		result.InputTokens != 20 || result.CachedInputTokens != 11 || result.OutputTokens != 3 {
 		t.Fatalf("result = %+v", result)
@@ -93,7 +105,7 @@ printf '%s\n' '{"structured_output":{"new_demands":[],"progress_updates":[],"rev
 }
 
 func TestFallbackAnalyzerRetriesClaudeOnceThenUsesCodex(t *testing.T) {
-	primary := &fakeAnalyzer{err: errors.New("day1 unavailable")}
+	primary := &fakeAnalyzer{err: errors.New("0821 unavailable")}
 	fallback := &fakeAnalyzer{result: Result{MissingContextIDs: []string{"message-1"}}}
 	result, err := (FallbackAnalyzer{Primary: primary, Fallback: fallback}).Analyze(context.Background(), []AnalysisInput{
 		{Messages: []Message{{ID: "message-1"}}, Candidates: []Message{{ID: "message-1"}}},
@@ -101,23 +113,23 @@ func TestFallbackAnalyzerRetriesClaudeOnceThenUsesCodex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if primary.calls != 2 || fallback.calls != 1 || !result.FallbackUsed || result.AnalyzerRoute != "codex" || !strings.Contains(result.PrimaryError, "day1 unavailable") {
+	if primary.calls != 2 || fallback.calls != 1 || !result.FallbackUsed || result.AnalyzerRoute != "codex" || !strings.Contains(result.PrimaryError, "0821 unavailable") {
 		t.Fatalf("calls primary=%d fallback=%d result=%+v", primary.calls, fallback.calls, result)
 	}
 }
 
-func TestClaudeDay1TimeoutKillsProcessGroup(t *testing.T) {
+func TestClaude0821TimeoutKillsProcessGroup(t *testing.T) {
 	directory := t.TempDir()
 	tabsPath := filepath.Join(directory, "tabs.json")
-	writeClaudeTabs(t, tabsPath, []claudeHubTab{{ID: "day1", AgentType: "claude", Target: "local", Env: map[string]string{
-		"ANTHROPIC_MODEL": "auto_model/alwaysday1", "ANTHROPIC_AUTH_TOKEN": "test-token",
+	writeClaudeTabs(t, tabsPath, []claudeHubTab{{ID: "0821", AgentType: "claude", Target: "local", Env: map[string]string{
+		"ANTHROPIC_MODEL": "model_api/experimental_0821", "ANTHROPIC_AUTH_TOKEN": "test-token",
 	}}})
 	script := filepath.Join(directory, "fake-claude")
 	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 60 &\nwait\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	started := time.Now()
-	_, err := (ClaudeDay1Analyzer{Path: script, HubTabsPath: tabsPath, Timeout: 100 * time.Millisecond}).Analyze(context.Background(), []AnalysisInput{
+	_, err := (Claude0821Analyzer{Path: script, HubTabsPath: tabsPath, Timeout: 100 * time.Millisecond}).Analyze(context.Background(), []AnalysisInput{
 		{Messages: []Message{{ID: "message-1"}}, Candidates: []Message{{ID: "message-1"}}},
 	})
 	if err == nil || !strings.Contains(err.Error(), "timed out") {

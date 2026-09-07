@@ -116,15 +116,18 @@ terminal output, and full transcripts are excluded. The summary runner reads
 file-backed bounded inputs with only `Read`/`Glob`; local Codex and Claude
 events may update existing demands or enter review, but cannot create demands.
 
-For its primary analyzer, InfoWall reads one existing **local** Claude day1
-tab from `~/.claude_hub/tabs.json` and launches its own ephemeral restricted
-Claude Code process. It does not modify Claude Hub, call a Hub API, install
-anything into Hub, or inspect remote-agent transcripts. Only the selected tab
-ID, a one-way configuration fingerprint, and health are stored; credentials
-remain process-local. If day1 fails twice, InfoWall uses the same temporary
+For its primary analyzer, InfoWall reads one existing **local** Claude 0821
+tab from `~/.claude_hub/tabs.json`, identified by an `ANTHROPIC_MODEL` value
+containing `0821`, and launches its own ephemeral restricted Claude Code
+process. It does not modify Claude Hub, call a Hub API, install anything into
+Hub, or inspect remote-agent transcripts. Only the selected tab ID, a one-way
+configuration fingerprint, and health are stored; credentials remain
+process-local. If Claude 0821 fails twice, InfoWall uses the same temporary
 files with Codex and exposes the fallback plus input/cache/output token counts
-in the workbench. Pin a specific local tab with `serve --claude-day1-tab ID`
-when auto-detection is ambiguous.
+in the workbench. Pin a specific local tab with `serve --claude-0821-tab ID`
+when auto-detection is ambiguous. `--claude-day1-tab` and
+`INFOWALL_CLAUDE_DAY1_TAB_ID` remain deprecated compatibility aliases; the
+selected tab must still identify 0821.
 
 The browser groups same-topic items into topic panels by default: links, notes,
 papers, images, and charts each get their own fixed-height panel with the
