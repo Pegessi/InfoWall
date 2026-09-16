@@ -3,6 +3,7 @@ package feishuingest
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -70,6 +71,83 @@ func TestAnalysisWorkspaceKeepsContextReadableButNotAllowedAsOutput(t *testing.T
 	}
 	if !strings.Contains(string(batchRaw), "om_context") || !strings.Contains(string(batchRaw), "earlier context") {
 		t.Fatalf("context message is not readable: %s", batchRaw)
+	}
+}
+
+func TestAnalysisWorkspacePreselectsBoundedRelevantDemands(t *testing.T) {
+	directory := t.TempDir()
+	relevantByLink := &model.Demand{ID: "demand-link", Title: "修复请求迁移", Sources: []model.Source{{ExternalID: "seed/llmserver!2817"}}}
+	relevantByText := &model.Demand{ID: "demand-text", Title: "优化 M15 CUDA Graph 批处理稳定性"}
+	demands := []*model.Demand{relevantByLink, relevantByText}
+	for index := 0; index < 64; index++ {
+		demands = append(demands, &model.Demand{ID: fmt.Sprintf("unrelated-%02d", index), Title: fmt.Sprintf("无关需求 %02d", index)})
+	}
+	batches := []AnalysisInput{{
+		Messages:   []Message{{ID: "candidate", Content: "M15 CUDA Graph 出现异常"}},
+		Candidates: []Message{{ID: "candidate", Content: "M15 CUDA Graph 出现异常", Links: []model.ProgressLink{{ExternalID: "seed/llmserver!2817"}}}},
+		Snapshot:   Snapshot{Demands: demands},
+	}}
+	workspace, err := writeAnalysisWorkspace(directory, batches, analysisCandidateMessageIDs(batches))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestRaw, err := os.ReadFile(workspace.ManifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest analysisManifest
+	if err := json.Unmarshal(manifestRaw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.DemandFiles) == 0 || len(manifest.DemandFiles) > analysisDemandFileLimit {
+		t.Fatalf("demand file count = %d, want 1..%d", len(manifest.DemandFiles), analysisDemandFileLimit)
+	}
+	selected := make(map[string]struct{}, len(manifest.DemandFiles))
+	for _, path := range manifest.DemandFiles {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var demand model.Demand
+		if err := json.Unmarshal(raw, &demand); err != nil {
+			t.Fatal(err)
+		}
+		selected[demand.ID] = struct{}{}
+	}
+	for _, id := range []string{"demand-link", "demand-text"} {
+		if _, ok := selected[id]; !ok {
+			t.Fatalf("relevant demand %q not preselected: %v", id, selected)
+		}
+	}
+	if _, ok := selected["unrelated-00"]; ok {
+		t.Fatalf("unrelated demand was exposed: %v", selected)
+	}
+}
+
+func TestSelectAnalysisDemandsCapsBroadLexicalMatches(t *testing.T) {
+	demands := make([]*model.Demand, 0, analysisDemandFileLimit+8)
+	for index := 0; index < analysisDemandFileLimit+8; index++ {
+		demands = append(demands, &model.Demand{ID: fmt.Sprintf("demand-%03d", index), Title: "M15 CUDA Graph 稳定性"})
+	}
+	batches := []AnalysisInput{{
+		Candidates: []Message{{ID: "candidate", Content: "M15 CUDA Graph 出现异常"}},
+		Snapshot:   Snapshot{Demands: demands},
+	}}
+	selected := selectAnalysisDemands(batches)
+	if len(selected) != analysisDemandFileLimit {
+		t.Fatalf("selected demand count = %d, want %d", len(selected), analysisDemandFileLimit)
+	}
+	wantLast := fmt.Sprintf("demand-%03d", analysisDemandFileLimit-1)
+	if selected[0].ID != "demand-000" || selected[len(selected)-1].ID != wantLast {
+		t.Fatalf("selection tie-break is not deterministic: first=%q last=%q", selected[0].ID, selected[len(selected)-1].ID)
+	}
+}
+
+func TestAnalysisPromptRequiresRawSchemaJSON(t *testing.T) {
+	for _, required := range []string{"OUTPUT PROTOCOL", "exactly one raw JSON object", "The first output byte must be {", "All five required top-level arrays"} {
+		if !strings.Contains(analysisPrompt, required) {
+			t.Fatalf("analysis prompt missing %q", required)
+		}
 	}
 }
 

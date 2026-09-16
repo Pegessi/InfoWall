@@ -115,6 +115,10 @@ working directory, and direct URLs are retained. Tool logs, reasoning, ANSI
 terminal output, and full transcripts are excluded. The summary runner reads
 file-backed bounded inputs with only `Read`/`Glob`; local Codex and Claude
 events may update existing demands or enter review, but cannot create demands.
+The analyzer receives every candidate batch plus at most 100 deterministically
+preselected existing demands: exact MR/Trial/document/source identities rank
+first, then bounded textual anchors. Its required response is one bare JSON
+object matching the supplied schema; prose and Markdown are rejected.
 
 For its primary analyzer, InfoWall reads one existing **local** Claude 0821
 tab from `~/.claude_hub/tabs.json`, identified by an `ANTHROPIC_MODEL` value
