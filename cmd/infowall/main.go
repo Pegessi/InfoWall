@@ -185,13 +185,9 @@ func cmdServe(args []string) error {
 	apiKey := fs.String("api-key", os.Getenv("INFOWALL_API_KEY"), "API key for write/auth")
 	defaultView := fs.String("default-view", envOr("INFOWALL_DEFAULT_VIEW", "workbench"), "default frontend: infowall or workbench")
 	claudePath := fs.String("claude-path", os.Getenv("INFOWALL_CLAUDE_PATH"), "Claude Code executable (auto-detected by default)")
-	claudeHubTabs := fs.String("claude-hub-tabs", os.Getenv("INFOWALL_CLAUDE_HUB_TABS"), "read-only Claude Hub tabs.json path")
-	claudeHubTabID := fs.String("claude-0821-tab", os.Getenv("INFOWALL_CLAUDE_0821_TAB_ID"), "local Claude Hub 0821 tab ID (auto-detected by model when empty)")
-	legacyClaudeHubTabID := fs.String("claude-day1-tab", os.Getenv("INFOWALL_CLAUDE_DAY1_TAB_ID"), "deprecated alias for --claude-0821-tab; selected tab must use 0821")
+	claudePresets := fs.String("claude-presets", os.Getenv("INFOWALL_CLAUDE_PRESETS"), "read-only Claude Hub env_presets.json path")
+	claudePreset := fs.String("claude-0821-preset", envOr("INFOWALL_CLAUDE_0821_PRESET", "0821"), "named local Claude 0821 environment preset")
 	fs.Parse(args)
-	if strings.TrimSpace(*claudeHubTabID) == "" {
-		*claudeHubTabID = strings.TrimSpace(*legacyClaudeHubTabID)
-	}
 
 	ctx := context.Background()
 	s, err := server.New(ctx, server.Config{
@@ -202,8 +198,8 @@ func cmdServe(args []string) error {
 		DistFS:            distFS(),
 		DefaultView:       *defaultView,
 		ClaudePath:        *claudePath,
-		ClaudeHubTabsPath: *claudeHubTabs,
-		ClaudeHubTabID:    *claudeHubTabID,
+		ClaudePresetsPath: *claudePresets,
+		ClaudePreset:      *claudePreset,
 	})
 	if err != nil {
 		return err

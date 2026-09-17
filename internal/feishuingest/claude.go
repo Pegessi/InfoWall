@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -18,24 +19,27 @@ import (
 )
 
 // Claude0821Analyzer starts an ephemeral, restricted Claude Code process. It
-// reads a local 0821 environment from Claude Hub's existing tabs.json without
-// calling or modifying Claude Hub and without persisting its credentials.
+// resolves one named local 0821 environment preset without calling or
+// modifying Claude Hub, reusing a Hub tab, or persisting credentials.
 type Claude0821Analyzer struct {
 	Path        string
-	HubTabsPath string
-	HubTabID    string
+	PresetsPath string
+	Preset      string
 	Timeout     time.Duration
 }
 
-type claudeHubTab struct {
-	ID        string            `json:"id"`
-	AgentType string            `json:"agent_type"`
-	Target    string            `json:"target"`
-	Env       map[string]string `json:"env"`
+type claudePresetFile struct {
+	CustomPresets []claudeEnvPreset `json:"custom_presets"`
+}
+
+type claudeEnvPreset struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Text string `json:"text"`
 }
 
 type claude0821Profile struct {
-	TabID       string
+	ID          string
 	Model       string
 	Fingerprint string
 	Env         map[string]string
@@ -48,18 +52,18 @@ type analyzerProfileProvider interface {
 // AnalyzerProfile resolves only non-secret identity metadata. Credentials are
 // never returned to the caller or persisted by InfoWall.
 func (analyzer Claude0821Analyzer) AnalyzerProfile() (string, string, error) {
-	profile, err := loadClaude0821Profile(analyzer.HubTabsPath, analyzer.HubTabID)
+	profile, err := loadClaude0821Profile(analyzer.PresetsPath, analyzer.Preset)
 	if err != nil {
 		return "", "", err
 	}
-	return profile.TabID, profile.Fingerprint, nil
+	return profile.ID, profile.Fingerprint, nil
 }
 
 func (analyzer Claude0821Analyzer) Analyze(ctx context.Context, batches []AnalysisInput) (Result, error) {
 	if len(analysisCandidateMessageIDs(batches)) == 0 {
 		return Result{}, nil
 	}
-	profile, err := loadClaude0821Profile(analyzer.HubTabsPath, analyzer.HubTabID)
+	profile, err := loadClaude0821Profile(analyzer.PresetsPath, analyzer.Preset)
 	if err != nil {
 		return Result{}, err
 	}
@@ -140,51 +144,77 @@ func (analyzer Claude0821Analyzer) Analyze(ctx context.Context, batches []Analys
 	result.CachedInputTokens = usage.CachedInputTokens
 	result.OutputTokens = usage.OutputTokens
 	result.AnalyzerRoute = "claude-0821"
-	result.AnalyzerProfileID = profile.TabID
+	result.AnalyzerProfileID = profile.ID
 	result.AnalyzerProfileFingerprint = profile.Fingerprint
 	result.AnalyzerHealthy = true
 	return result, nil
 }
 
-func loadClaude0821Profile(path, requestedTabID string) (claude0821Profile, error) {
+var claudePresetEnvKey = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+func loadClaude0821Profile(path, requestedPreset string) (claude0821Profile, error) {
 	if strings.TrimSpace(path) == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return claude0821Profile{}, err
 		}
-		path = filepath.Join(home, ".claude_hub", "tabs.json")
+		path = filepath.Join(home, ".claude_hub", "env_presets.json")
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return claude0821Profile{}, fmt.Errorf("read Claude Hub local tabs: %w", err)
+		return claude0821Profile{}, fmt.Errorf("read Claude Hub environment presets: %w", err)
 	}
-	var tabs []claudeHubTab
-	if err := json.Unmarshal(raw, &tabs); err != nil {
-		return claude0821Profile{}, fmt.Errorf("decode Claude Hub local tabs: %w", err)
+	var presets claudePresetFile
+	if err := json.Unmarshal(raw, &presets); err != nil {
+		return claude0821Profile{}, fmt.Errorf("decode Claude Hub environment presets: %w", err)
 	}
-	sort.Slice(tabs, func(i, j int) bool { return tabs[i].ID < tabs[j].ID })
-	requestedTabID = strings.TrimSpace(requestedTabID)
-	for _, tab := range tabs {
-		if requestedTabID != "" && tab.ID != requestedTabID {
+	requestedPreset = strings.TrimSpace(requestedPreset)
+	if requestedPreset == "" {
+		requestedPreset = "0821"
+	}
+	for _, preset := range presets.CustomPresets {
+		if preset.ID != requestedPreset && !strings.EqualFold(preset.Name, requestedPreset) {
 			continue
 		}
-		if strings.ToLower(tab.Target) != "local" || strings.ToLower(tab.AgentType) != "claude" {
-			continue
+		env, err := parseClaudePresetEnvironment(preset.Text)
+		if err != nil {
+			return claude0821Profile{}, fmt.Errorf("decode Claude Hub environment preset %q: %w", preset.ID, err)
 		}
-		model := strings.TrimSpace(tab.Env["ANTHROPIC_MODEL"])
+		env = filterClaudeEnvironment(env)
+		model := strings.TrimSpace(env["ANTHROPIC_MODEL"])
 		if !isClaude0821Model(model) {
+			return claude0821Profile{}, fmt.Errorf("Claude Hub environment preset %q does not select an 0821 model", preset.ID)
+		}
+		if !hasClaudeCredential(env) {
+			return claude0821Profile{}, fmt.Errorf("Claude Hub environment preset %q has no usable Claude credential", preset.ID)
+		}
+		return claude0821Profile{ID: preset.ID, Model: model, Fingerprint: profileFingerprint(preset.ID, env), Env: env}, nil
+	}
+	return claude0821Profile{}, fmt.Errorf("no usable local Claude 0821 environment preset named %q", requestedPreset)
+}
+
+func parseClaudePresetEnvironment(text string) (map[string]string, error) {
+	env := make(map[string]string)
+	for lineNumber, rawLine := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if model == "" || !hasClaudeCredential(tab.Env) {
-			continue
+		if len(line) >= len("export ") && strings.EqualFold(line[:len("export ")], "export ") {
+			line = strings.TrimSpace(line[len("export "):])
 		}
-		env := filterClaudeEnvironment(tab.Env)
-		return claude0821Profile{TabID: tab.ID, Model: model, Fingerprint: profileFingerprint(tab.ID, env), Env: env}, nil
+		key, value, ok := strings.Cut(line, "=")
+		key = strings.TrimSpace(key)
+		if !ok || !claudePresetEnvKey.MatchString(key) {
+			return nil, fmt.Errorf("invalid environment assignment at line %d", lineNumber+1)
+		}
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 && ((value[0] == '\'' && value[len(value)-1] == '\'') || (value[0] == '"' && value[len(value)-1] == '"')) {
+			value = value[1 : len(value)-1]
+		}
+		env[key] = value
 	}
-	if requestedTabID != "" {
-		return claude0821Profile{}, fmt.Errorf("Claude Hub tab %q is not a usable local Claude 0821 environment", requestedTabID)
-	}
-	return claude0821Profile{}, errors.New("no usable local Claude 0821 environment found in Claude Hub tabs")
+	return env, nil
 }
 
 func isClaude0821Model(model string) bool {

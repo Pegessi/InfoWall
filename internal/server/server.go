@@ -43,8 +43,8 @@ type Config struct {
 	CodexCWD           string
 	CodexTimeout       time.Duration
 	ClaudePath         string
-	ClaudeHubTabsPath  string
-	ClaudeHubTabID     string
+	ClaudePresetsPath  string
+	ClaudePreset       string
 	ClaudeTimeout      time.Duration
 }
 
@@ -138,8 +138,8 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 	analyzer := cfg.IngestionAnalyzer
 	if analyzer == nil {
 		analyzer = feishuingest.FallbackAnalyzer{
-			Primary: feishuingest.Claude0821Analyzer{Path: cfg.ClaudePath, HubTabsPath: cfg.ClaudeHubTabsPath,
-				HubTabID: cfg.ClaudeHubTabID, Timeout: cfg.ClaudeTimeout},
+			Primary: feishuingest.Claude0821Analyzer{Path: cfg.ClaudePath, PresetsPath: cfg.ClaudePresetsPath,
+				Preset: cfg.ClaudePreset, Timeout: cfg.ClaudeTimeout},
 			Fallback: feishuingest.CodexAnalyzer{Path: cfg.CodexPath, CWD: cfg.CodexCWD, Timeout: cfg.CodexTimeout},
 		}
 	}
