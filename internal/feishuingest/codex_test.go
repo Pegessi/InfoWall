@@ -30,6 +30,9 @@ func TestAnalysisSchemaRestrictsEveryReturnedMessageIDToCandidates(t *testing.T)
 	if err := json.Unmarshal(raw, &schema); err != nil {
 		t.Fatal(err)
 	}
+	if _, present := schema["$schema"]; present {
+		t.Fatalf("generated schema must not declare $schema; it disables Claude Code's native structured output: %s", raw)
+	}
 	definitions := schema["$defs"].(map[string]any)
 	messageID := definitions["message_id"].(map[string]any)
 	enum := messageID["enum"].([]any)

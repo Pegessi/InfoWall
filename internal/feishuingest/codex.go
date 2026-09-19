@@ -378,6 +378,13 @@ func analysisSchemaFor(allowedMessageIDs []string) ([]byte, error) {
 	if err := json.Unmarshal([]byte(analysisSchema), &schema); err != nil {
 		return nil, fmt.Errorf("decode analysis schema: %w", err)
 	}
+	// Claude Code's --json-schema maps the schema onto its StructuredOutput
+	// tool input, which rejects the JSON-Schema dialect declaration. With
+	// "$schema" present it silently skips native structured output and the
+	// model free-styles text, which is the source of the intermittent
+	// invalid-json failures on the 0821 route. The key is inert for Codex and
+	// for InfoWall's own validation, so drop it for every analyzer.
+	delete(schema, "$schema")
 	definitions, ok := schema["$defs"].(map[string]any)
 	if !ok {
 		return nil, errors.New("analysis schema is missing $defs")
