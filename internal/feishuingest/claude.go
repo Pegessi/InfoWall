@@ -90,7 +90,7 @@ func (analyzer Claude0821Analyzer) Analyze(ctx context.Context, batches []Analys
 	}
 	timeout := analyzer.Timeout
 	if timeout <= 0 {
-		timeout = 10 * time.Minute
+		timeout = defaultAnalysisTimeout
 	}
 	runContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

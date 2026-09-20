@@ -102,20 +102,15 @@ func TestAnalysisWorkspacePreselectsBoundedRelevantDemands(t *testing.T) {
 	if err := json.Unmarshal(manifestRaw, &manifest); err != nil {
 		t.Fatal(err)
 	}
-	if len(manifest.DemandFiles) == 0 || len(manifest.DemandFiles) > analysisDemandFileLimit {
-		t.Fatalf("demand file count = %d, want 1..%d", len(manifest.DemandFiles), analysisDemandFileLimit)
+	if len(manifest.ExistingDemands) == 0 || len(manifest.ExistingDemands) > analysisDemandLimit {
+		t.Fatalf("inlined demand count = %d, want 1..%d", len(manifest.ExistingDemands), analysisDemandLimit)
 	}
-	selected := make(map[string]struct{}, len(manifest.DemandFiles))
-	for _, path := range manifest.DemandFiles {
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var demand model.Demand
-		if err := json.Unmarshal(raw, &demand); err != nil {
-			t.Fatal(err)
-		}
+	selected := make(map[string]struct{}, len(manifest.ExistingDemands))
+	for _, demand := range manifest.ExistingDemands {
 		selected[demand.ID] = struct{}{}
+	}
+	if len(manifest.CandidateFiles) == 0 {
+		t.Fatalf("manifest should still reference candidate batch files")
 	}
 	for _, id := range []string{"demand-link", "demand-text"} {
 		if _, ok := selected[id]; !ok {
@@ -127,22 +122,67 @@ func TestAnalysisWorkspacePreselectsBoundedRelevantDemands(t *testing.T) {
 	}
 }
 
-func TestSelectAnalysisDemandsCapsBroadLexicalMatches(t *testing.T) {
-	demands := make([]*model.Demand, 0, analysisDemandFileLimit+8)
-	for index := 0; index < analysisDemandFileLimit+8; index++ {
+func TestSelectAnalysisDemandsFiltersGenericAnchors(t *testing.T) {
+	// Every demand shares the same broad component wording. The candidate's
+	// matching anchors therefore have a high document frequency and must be
+	// treated as stopwords, so nothing is preselected on generic vocabulary.
+	demands := make([]*model.Demand, 0, analysisDemandLimit+8)
+	for index := 0; index < analysisDemandLimit+8; index++ {
 		demands = append(demands, &model.Demand{ID: fmt.Sprintf("demand-%03d", index), Title: "M15 CUDA Graph 稳定性"})
 	}
 	batches := []AnalysisInput{{
 		Candidates: []Message{{ID: "candidate", Content: "M15 CUDA Graph 出现异常"}},
 		Snapshot:   Snapshot{Demands: demands},
 	}}
-	selected := selectAnalysisDemands(batches)
-	if len(selected) != analysisDemandFileLimit {
-		t.Fatalf("selected demand count = %d, want %d", len(selected), analysisDemandFileLimit)
+	if selected := selectAnalysisDemands(batches); len(selected) != 0 {
+		ids := make([]string, 0, len(selected))
+		for _, d := range selected {
+			ids = append(ids, d.ID)
+		}
+		t.Fatalf("generic anchors preselected %d demands: %v", len(selected), ids)
 	}
-	wantLast := fmt.Sprintf("demand-%03d", analysisDemandFileLimit-1)
+}
+
+func TestSelectAnalysisDemandsCapsIdentityMatches(t *testing.T) {
+	// Distinct stable resource identities are strong evidence regardless of
+	// wording; the preselection is still hard-capped deterministically.
+	demands := make([]*model.Demand, 0, analysisDemandLimit+8)
+	candidate := Message{ID: "candidate", Content: "同步一批外部资源的最新状态", Links: []model.ProgressLink{}}
+	for index := 0; index < analysisDemandLimit+8; index++ {
+		externalID := fmt.Sprintf("seed/llmserver!%04d", index)
+		demands = append(demands, &model.Demand{ID: fmt.Sprintf("demand-%03d", index),
+			Sources: []model.Source{{ExternalID: externalID}}})
+		candidate.Links = append(candidate.Links, model.ProgressLink{ExternalID: externalID})
+	}
+	batches := []AnalysisInput{{Candidates: []Message{candidate}, Snapshot: Snapshot{Demands: demands}}}
+	selected := selectAnalysisDemands(batches)
+	if len(selected) != analysisDemandLimit {
+		t.Fatalf("selected demand count = %d, want %d", len(selected), analysisDemandLimit)
+	}
+	wantLast := fmt.Sprintf("demand-%03d", analysisDemandLimit-1)
 	if selected[0].ID != "demand-000" || selected[len(selected)-1].ID != wantLast {
 		t.Fatalf("selection tie-break is not deterministic: first=%q last=%q", selected[0].ID, selected[len(selected)-1].ID)
+	}
+}
+
+func TestSelectAnalysisDemandsMatchesRareASCIIAnchors(t *testing.T) {
+	relevant := &model.Demand{ID: "demand-ascii", Title: "优化 M15 CUDA Graph 推理稳定性"}
+	demands := []*model.Demand{relevant}
+	for index := 0; index < 20; index++ {
+		demands = append(demands, &model.Demand{ID: fmt.Sprintf("generic-%02d", index),
+			Title: fmt.Sprintf("关于接口需求进度排期与模块问题的日常跟进 %02d", index)})
+	}
+	batches := []AnalysisInput{{
+		Candidates: []Message{{ID: "candidate", Content: "M15 CUDA Graph 推理又超时了，帮忙看下"}},
+		Snapshot:   Snapshot{Demands: demands},
+	}}
+	selected := selectAnalysisDemands(batches)
+	if len(selected) != 1 || selected[0].ID != "demand-ascii" {
+		ids := make([]string, 0, len(selected))
+		for _, d := range selected {
+			ids = append(ids, d.ID)
+		}
+		t.Fatalf("rare ASCII match = %v, want only demand-ascii", ids)
 	}
 }
 
