@@ -21,8 +21,12 @@ push` items into it, and pin the tab.
 # Build (requires Go 1.22+ and Node 20+ for the frontend build):
 make build
 
-# Start the server:
-./bin/infowall serve --addr :8899 --db infowall.db --default-view workbench
+# Persistent personal-workbench database. Keep it outside the Git worktree.
+export INFOWALL_DB="$HOME/Library/Application Support/infowall/personal-workbench.db"
+mkdir -p "$HOME/Library/Application Support/infowall"
+
+# Start the server against the persistent database:
+./bin/infowall serve --addr 127.0.0.1:8899 --db "$INFOWALL_DB" --default-view workbench
 
 # In another terminal, push a note:
 echo "# hello world" | ./bin/infowall push -
@@ -181,11 +185,14 @@ For day-to-day local operation, start the server and verify it from a second
 terminal before pushing data or opening the wall:
 
 ```bash
-# Terminal 1: start the local service
-./bin/infowall serve --addr :8899 --db infowall.db
+# Terminal 1: use the one persistent personal-workbench database.
+export INFOWALL_URL=http://127.0.0.1:8899
+export INFOWALL_DB="$HOME/Library/Application Support/infowall/personal-workbench.db"
+./bin/infowall serve --addr 127.0.0.1:8899 --db "$INFOWALL_DB"
 
 # Terminal 2: verify the configured endpoint
-./bin/infowall health --server http://localhost:8899 --json
+./bin/infowall health --server "$INFOWALL_URL" --json
+./bin/infowall db info --db "$INFOWALL_DB" --json
 ```
 
 Expected JSON is intentionally small and safe:
@@ -223,8 +230,9 @@ Troubleshooting:
 
 - **Wrong URL**: check `INFOWALL_URL` and any `--server` override. Flags take
   precedence over environment variables.
-- **Server down**: start `./bin/infowall serve --addr :8899 --db infowall.db`
-  and make sure the listen address matches the health command.
+- **Server down**: restart with the fixed personal path,
+  `./bin/infowall serve --addr 127.0.0.1:8899 --db "$INFOWALL_DB"`, and make
+  sure the listen address matches the health command.
 - **API key confusion**: health is intentionally unauthenticated. If health
   passes but `doctor` reports `server 401`, set `INFOWALL_API_KEY` or pass
   `--api-key` to protected API commands.
@@ -239,9 +247,9 @@ start/restart:
 
 ```bash
 export INFOWALL_URL=http://127.0.0.1:8899
-export INFOWALL_DB="$HOME/Library/Application Support/infowall/infowall.db"
+export INFOWALL_DB="$HOME/Library/Application Support/infowall/personal-workbench.db"
 export INFOWALL_API_KEY=replace-with-a-long-random-local-secret
-mkdir -p "$HOME/Library/Application Support/infowall" "$HOME/Library/Logs/infowall"
+mkdir -p "$HOME/Library/Application Support/infowall/backups" "$HOME/Library/Logs/infowall"
 
 ./bin/infowall serve --addr 127.0.0.1:8899 --db "$INFOWALL_DB" \
   --api-key "$INFOWALL_API_KEY"
@@ -265,14 +273,14 @@ values, keep the copied file private (`chmod 600`), then lint and load your
 copy:
 
 ```bash
-mkdir -p "$HOME/Library/Application Support/infowall" "$HOME/Library/Logs/infowall"
+mkdir -p "$HOME/Library/Application Support/infowall/backups" "$HOME/Library/Logs/infowall"
 plutil -lint ~/Library/LaunchAgents/com.example.infowall.plist
 launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.example.infowall.plist
 launchctl kickstart -k "gui/$(id -u)/com.example.infowall"
 
 ./bin/infowall health --server http://127.0.0.1:8899 --json
 ./bin/infowall doctor --server http://127.0.0.1:8899 --api-key "$INFOWALL_API_KEY" --json
-./bin/infowall db info --db "$HOME/Library/Application Support/infowall/infowall.db" --json
+./bin/infowall db info --db "$HOME/Library/Application Support/infowall/personal-workbench.db" --json
 ```
 
 Stop and restart the local service with launchd when you need to verify a fresh
@@ -299,12 +307,22 @@ schedule you control. Everything here is intentionally **local-only**: there is
 no cloud sync, no remote/offsite backup service, no accounts, and no
 multi-device data model. Durability is your filesystem plus the backups you take.
 
-**1. Pin the DB path explicitly.** Always pass `--db` (or set `INFOWALL_DB`) so
-the database does not depend on the current working directory:
+**1. Pin the DB path explicitly.** For this personal workbench, the one
+persistent path is
+`$HOME/Library/Application Support/infowall/personal-workbench.db`. Always pass
+`--db "$INFOWALL_DB"` (or set `INFOWALL_DB`) so the database does not depend on
+the current working directory:
 
 ```bash
-./bin/infowall serve --addr :8899 --db /srv/infowall/infowall.db
+export INFOWALL_DB="$HOME/Library/Application Support/infowall/personal-workbench.db"
+./bin/infowall serve --addr 127.0.0.1:8899 --db "$INFOWALL_DB"
 ```
+
+`infowall.db` without an explicit path is only the CLI's current-directory
+fallback; it is not a second personal-workbench database and must not be used
+for daily serving. A server deployment may choose another fixed path, but must
+set `INFOWALL_DB` explicitly and keep its service manager, backups, and health
+checks on that same path.
 
 A nested path is handled deliberately: the parent directory is created if it is
 missing. If the path is unusable (e.g. it points at a directory, or a parent
@@ -326,7 +344,7 @@ directly and do not need the key.
 **3. Inspect the active database.**
 
 ```bash
-./bin/infowall db info --db /srv/infowall/infowall.db --json
+./bin/infowall db info --db "$INFOWALL_DB" --json
 ```
 
 Reports the absolute path, file size, WAL/SHM sidecar presence, item count, and
@@ -336,8 +354,9 @@ confirm which file is live and that it is healthy.
 **4. Back up safely, even while serving.**
 
 ```bash
-./bin/infowall db backup --db /srv/infowall/infowall.db \
-  --out /srv/infowall/backups/infowall-$(date +%F-%H%M).db --json
+mkdir -p "$HOME/Library/Application Support/infowall/backups"
+./bin/infowall db backup --db "$INFOWALL_DB" \
+  --out "$HOME/Library/Application Support/infowall/backups/personal-workbench-$(date +%F-%H%M).db" --json
 ```
 
 `db backup` uses SQLite `VACUUM INTO`, which is consistent against a live,
@@ -368,14 +387,14 @@ Restore is a deliberate manual step:
 ```bash
 # 1. Stop the server (Ctrl-C / your service manager) so nothing is writing.
 # 2. Move the current files aside, including any WAL/SHM sidecars:
-mv /srv/infowall/infowall.db     /srv/infowall/infowall.db.old      2>/dev/null || true
-mv /srv/infowall/infowall.db-wal /srv/infowall/infowall.db-wal.old  2>/dev/null || true
-mv /srv/infowall/infowall.db-shm /srv/infowall/infowall.db-shm.old  2>/dev/null || true
+mv "$INFOWALL_DB"     "$INFOWALL_DB.old"      2>/dev/null || true
+mv "$INFOWALL_DB-wal" "$INFOWALL_DB-wal.old"  2>/dev/null || true
+mv "$INFOWALL_DB-shm" "$INFOWALL_DB-shm.old"  2>/dev/null || true
 # 3. Copy the chosen backup into the live path:
-cp /srv/infowall/backups/infowall-2026-07-01-0900.db /srv/infowall/infowall.db
+cp "$HOME/Library/Application Support/infowall/backups/personal-workbench-2026-07-01-0900.db" "$INFOWALL_DB"
 # 4. Start the server again and verify:
-./bin/infowall serve --addr :8899 --db /srv/infowall/infowall.db &
-./bin/infowall db info --db /srv/infowall/infowall.db --json
+./bin/infowall serve --addr 127.0.0.1:8899 --db "$INFOWALL_DB" &
+./bin/infowall db info --db "$INFOWALL_DB" --json
 ```
 
 A `VACUUM INTO` backup is a fully self-contained database with no sidecar files,
@@ -458,7 +477,9 @@ API paths reject the configured key.
 ### `db info` / `db backup`
 
 Local SQLite persistence commands. They act on the database **file** (`--db`, or
-`INFOWALL_DB`, default `infowall.db`), not a running server.
+`INFOWALL_DB`, with `infowall.db` only as the current-directory fallback), not
+a running server. For the personal workbench, always pass the fixed
+`$INFOWALL_DB` path rather than relying on that fallback.
 
 `db info` reports the resolved (absolute) DB path, whether the file exists, its
 size, whether the `-wal` / `-shm` sidecar files are present, the item count, and
@@ -474,9 +495,10 @@ overwrite an existing `--out` file and creates the destination's parent
 directory if needed.
 
 ```bash
-./bin/infowall db info --json
-./bin/infowall db info --db /srv/infowall/infowall.db --json
-./bin/infowall db backup --out backups/wall-$(date +%F).db --json
+export INFOWALL_DB="$HOME/Library/Application Support/infowall/personal-workbench.db"
+./bin/infowall db info --db "$INFOWALL_DB" --json
+./bin/infowall db backup --db "$INFOWALL_DB" \
+  --out "$HOME/Library/Application Support/infowall/backups/personal-workbench-$(date +%F).db" --json
 ```
 
 ### `push`
@@ -778,7 +800,7 @@ curl -sN http://localhost:8899/events
 | `INFOWALL_URL`     | `http://localhost:8899`  | CLI        | Server base URL for push/list      |
 | `INFOWALL_API_KEY` | *(unset)*                | CLI/server | Shared secret for API auth          |
 | `INFOWALL_ADDR`    | `:8899`                  | `serve`    | Listen address (overridden by --addr)|
-| `INFOWALL_DB`      | `infowall.db`            | `serve`, `db` | SQLite path (overridden by --db)   |
+| `INFOWALL_DB`      | `infowall.db` fallback only | `serve`, `db` | SQLite path (overridden by `--db`); personal serving uses the explicit Application Support path |
 | `INFOWALL_DEFAULT_VIEW` | `workbench`         | `serve`    | Default interface: `infowall` or `workbench` |
 
 CLI flags take precedence over environment variables.
