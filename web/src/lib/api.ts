@@ -15,11 +15,6 @@ function authHeaders(): Record<string, string> {
   return key ? { Authorization: `Bearer ${key}` } : {};
 }
 
-function buildEventUrl(path: string): string {
-  const key = getKey();
-  return key ? `${API_BASE}${path}?key=${encodeURIComponent(key)}` : `${API_BASE}${path}`;
-}
-
 export async function fetchItems(
   limit = 50,
   offset = 0,
@@ -120,5 +115,5 @@ export async function deleteItem(id: string): Promise<void> {
 }
 
 export function createEventSource(): EventSource {
-  return new EventSource(buildEventUrl("/events"));
+  return new EventSource(`${API_BASE}/events`);
 }

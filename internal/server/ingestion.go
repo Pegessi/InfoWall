@@ -124,10 +124,30 @@ type feishuChatPatch struct {
 	ResumeFrom      *string   `json:"resume_from"`
 }
 
+// pureDisable reports whether the patch only asks to turn ingestion off. The
+// standard JSON decoder leaves omitted (and null) pointer fields nil, while an
+// explicit false, empty string, zero integer, or empty slice is non-nil. That
+// lets this guard reject every effective configuration change, including
+// explicit zero values, when no ingestion adapter can consume the result.
+func (patch feishuChatPatch) pureDisable() bool {
+	return patch.Enabled != nil && !*patch.Enabled &&
+		patch.Timezone == nil &&
+		patch.ActiveStart == nil &&
+		patch.ActiveEnd == nil &&
+		patch.IntervalMinutes == nil &&
+		patch.OverlapMinutes == nil &&
+		patch.ExcludedChatIDs == nil &&
+		patch.ResumeFrom == nil
+}
+
 func (s *Server) handlePatchFeishuChat(w http.ResponseWriter, r *http.Request) {
 	var patch feishuChatPatch
 	if err := decodeJSON(r, &patch); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if s.ingestWorker == nil && !patch.pureDisable() {
+		writeIntegrationUnavailable(w, "activity ingestion is not configured")
 		return
 	}
 	state, err := s.store.GetFeishuIngestionState(r.Context())
@@ -170,7 +190,7 @@ func (s *Server) handlePatchFeishuChat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if updated.Enabled {
+	if updated.Enabled && s.ingestWorker != nil {
 		s.ingestWorker.Wake()
 	}
 	s.broadcast("feishu_ingestion.updated", updated)
@@ -179,6 +199,10 @@ func (s *Server) handlePatchFeishuChat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleScanFeishuChat(w http.ResponseWriter, r *http.Request) {
+	if s.ingestWorker == nil {
+		writeIntegrationUnavailable(w, "activity ingestion is not configured")
+		return
+	}
 	state, err := s.store.RequestFeishuIngestion(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusConflict, err)
@@ -210,6 +234,10 @@ func (s *Server) handleListDemandReviews(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handlePutConversationHookEvent(w http.ResponseWriter, r *http.Request) {
+	if s.ingestWorker == nil || s.ingestWorker.LocalCollector == nil {
+		writeIntegrationUnavailable(w, "local conversation ingestion is not configured")
+		return
+	}
 	var event model.ConversationHookEvent
 	if err := decodeJSON(r, &event); err != nil {
 		writeErr(w, http.StatusBadRequest, err)

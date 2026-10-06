@@ -346,6 +346,5 @@ export async function dismissDemandReview(id: string): Promise<void> {
 }
 
 export function createWorkbenchEventSource(): EventSource {
-  const key = getKey();
-  return new EventSource(key ? `/events?key=${encodeURIComponent(key)}` : "/events");
+  return new EventSource("/events");
 }

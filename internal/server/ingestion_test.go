@@ -26,22 +26,22 @@ func (noCallAnalyzer) Analyze(context.Context, []feishuingest.AnalysisInput) (fe
 }
 
 func TestProductionLarkRunnersUseIntegrationSpecificTimeouts(t *testing.T) {
-	srv, err := New(context.Background(), Config{DBPath: filepath.Join(t.TempDir(), "wall.db"), IngestionAnalyzer: noCallAnalyzer{}})
+	syncRunner, ingestionRunner, err := legacyLarkRunners(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer srv.Close()
-	syncRunner, ok := srv.feishuClient.Runner.(feishusync.ExecRunner)
-	if !ok || syncRunner.Timeout != 0 {
-		t.Fatalf("document sync runner = %#v", srv.feishuClient.Runner)
+	documentExec, ok := syncRunner.(feishusync.ExecRunner)
+	if !ok || documentExec.Timeout != 0 {
+		t.Fatalf("document sync runner = %#v", syncRunner)
 	}
-	collector, ok := srv.ingestWorker.Collector.(feishuingest.LarkCollector)
-	if !ok {
-		t.Fatalf("ingestion collector = %#v", srv.ingestWorker.Collector)
+	ingestionExec, ok := ingestionRunner.(feishusync.ExecRunner)
+	if !ok || ingestionExec.Timeout != defaultIngestionLarkTimeout {
+		t.Fatalf("ingestion runner = %#v", ingestionRunner)
 	}
-	ingestionRunner, ok := collector.Runner.(feishusync.ExecRunner)
-	if !ok || ingestionRunner.Timeout != defaultIngestionLarkTimeout {
-		t.Fatalf("ingestion runner = %#v", collector.Runner)
+	configured := feishusync.ExecRunner{Path: "custom-lark", Timeout: 7 * time.Second}
+	syncRunner, ingestionRunner, err = legacyLarkRunners(configured)
+	if err != nil || syncRunner != configured || ingestionRunner != configured {
+		t.Fatalf("configured value runner changed: sync=%#v ingestion=%#v err=%v", syncRunner, ingestionRunner, err)
 	}
 }
 

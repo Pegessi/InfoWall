@@ -13,6 +13,71 @@ import (
 	"testing"
 )
 
+func TestIntegrationsForMode(t *testing.T) {
+	t.Run("builtin preserves compatibility composition", func(t *testing.T) {
+		components, err := integrationsForMode("builtin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if components != nil {
+			t.Fatalf("builtin components = %#v, want nil", components)
+		}
+	})
+
+	t.Run("none selects explicit empty composition", func(t *testing.T) {
+		components, err := integrationsForMode("none")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if components == nil || !components.Empty() {
+			t.Fatalf("none components = %#v, want non-nil empty composition", components)
+		}
+	})
+
+	t.Run("mode is normalized", func(t *testing.T) {
+		components, err := integrationsForMode("  NONE  ")
+		if err != nil || components == nil || !components.Empty() {
+			t.Fatalf("normalized none = %#v, err=%v", components, err)
+		}
+	})
+
+	t.Run("invalid mode fails before server construction", func(t *testing.T) {
+		components, err := integrationsForMode("external")
+		if err == nil || components != nil {
+			t.Fatalf("invalid mode components = %#v, err=%v", components, err)
+		}
+		if !strings.Contains(err.Error(), "want builtin or none") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+}
+
+func TestServeRejectsInvalidIntegrationModeBeforeOpeningDatabase(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "must-not-exist.db")
+	t.Setenv("INFOWALL_INTEGRATIONS", "invalid-from-env")
+
+	err := cmdServe([]string{"--db", dbPath})
+	if err == nil || !strings.Contains(err.Error(), "invalid integrations mode") {
+		t.Fatalf("cmdServe error = %v", err)
+	}
+	if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
+		t.Fatalf("database was touched before validation: stat err=%v", statErr)
+	}
+}
+
+func TestServeIntegrationFlagOverridesEnvironmentBeforeValidation(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "must-not-exist.db")
+	t.Setenv("INFOWALL_INTEGRATIONS", "invalid-from-env")
+
+	err := cmdServe([]string{"--db", dbPath, "--integrations", "invalid-from-flag"})
+	if err == nil || !strings.Contains(err.Error(), `"invalid-from-flag"`) {
+		t.Fatalf("cmdServe error = %v", err)
+	}
+	if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
+		t.Fatalf("database was touched before validation: stat err=%v", statErr)
+	}
+}
+
 func TestExpandSources(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "b.md"), "# B")
@@ -194,6 +259,41 @@ func TestPushOneEndToEnd(t *testing.T) {
 	}
 }
 
+func TestClientReadsAPIKeyFileOnlyForWrites(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "api-key")
+	mustWrite(t, keyPath, "file-secret\n")
+	if err := os.Chmod(keyPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var gotHealthAuth, gotWriteAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			gotHealthAuth = r.Header.Get("Authorization")
+		} else {
+			gotWriteAuth = r.Header.Get("Authorization")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			io.WriteString(w, `{"ok":true,"service":"infowall","status":"ok"}`)
+			return
+		}
+		io.WriteString(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+	cfg := &clientConfig{server: srv.URL, apiKeyFile: keyPath}
+	if _, err := checkHealth(cfg); err != nil {
+		t.Fatal(err)
+	}
+	response, err := cfg.do(http.MethodPost, cfg.url("/api/auth/write-check"), "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if gotHealthAuth != "" || gotWriteAuth != "Bearer file-secret" {
+		t.Fatalf("authorization headers: health=%q write=%q", gotHealthAuth, gotWriteAuth)
+	}
+}
+
 func TestPushOneServerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -219,8 +319,8 @@ func TestExportCommandJSONLinesFetchesRawItems(t *testing.T) {
 	var sawList bool
 	var gotItemIDs []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer secret" {
-			t.Fatalf("auth header not sent: %q", got)
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("public read should not send auth header: %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -443,8 +543,8 @@ func TestHealthCommandJSONSuccess(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != "/api/health" {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer secret" {
-			t.Fatalf("auth header not sent through shared client flags: %q", got)
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("public health should not send auth header: %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
@@ -511,8 +611,8 @@ func TestHealthCommandJSONFailure(t *testing.T) {
 }
 
 func TestDoctorCommandJSONSuccess(t *testing.T) {
-	var sawHealth, sawItems bool
-	var gotHealthAuth, gotItemsAuth string
+	var sawHealth, sawWriteCheck bool
+	var gotHealthAuth, gotWriteCheckAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -525,13 +625,13 @@ func TestDoctorCommandJSONSuccess(t *testing.T) {
 				"status":  "ok",
 				"ts":      "2026-07-01T00:00:00Z",
 			})
-		case "/api/items":
-			sawItems = true
-			gotItemsAuth = r.Header.Get("Authorization")
-			if r.URL.Query().Get("limit") != "1" {
-				t.Fatalf("items probe should use limit=1, got %q", r.URL.RawQuery)
+		case "/api/auth/write-check":
+			sawWriteCheck = true
+			gotWriteCheckAuth = r.Header.Get("Authorization")
+			if r.Method != http.MethodPost || r.URL.RawQuery != "" {
+				t.Fatalf("write auth probe = %s %s, want POST without query", r.Method, r.URL.String())
 			}
-			json.NewEncoder(w).Encode(map[string]any{"items": []any{}})
+			json.NewEncoder(w).Encode(map[string]any{"ok": true, "write_authorized": true})
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
 		}
@@ -550,11 +650,11 @@ func TestDoctorCommandJSONSuccess(t *testing.T) {
 	if strings.Contains(stdout, "secret") {
 		t.Fatalf("doctor output leaked secret: %q", stdout)
 	}
-	if !sawHealth || !sawItems {
-		t.Fatalf("doctor should call both health and items, saw health=%v items=%v", sawHealth, sawItems)
+	if !sawHealth || !sawWriteCheck {
+		t.Fatalf("doctor should call health and write check, saw health=%v write_check=%v", sawHealth, sawWriteCheck)
 	}
-	if gotHealthAuth != "Bearer secret" || gotItemsAuth != "Bearer secret" {
-		t.Fatalf("shared auth header not sent to probes: health=%q items=%q", gotHealthAuth, gotItemsAuth)
+	if gotHealthAuth != "" || gotWriteCheckAuth != "Bearer secret" {
+		t.Fatalf("unexpected auth headers: health=%q write_check=%q", gotHealthAuth, gotWriteCheckAuth)
 	}
 
 	var got doctorResult
@@ -578,6 +678,32 @@ func TestDoctorCommandJSONSuccess(t *testing.T) {
 	}
 }
 
+func TestWriteReadiness(t *testing.T) {
+	tests := []struct {
+		health healthResult
+		want   bool
+	}{
+		{health: healthResult{InstanceRole: "primary"}, want: true},
+		{health: healthResult{InstanceRole: "primary", ReadOnly: true}},
+		{health: healthResult{InstanceRole: "mirror"}},
+		{health: healthResult{}},
+	}
+	for _, test := range tests {
+		got, blocker := writeReadiness(&test.health)
+		if got != test.want || (!got && blocker == "") {
+			t.Fatalf("writeReadiness(%+v) = %v, %q", test.health, got, blocker)
+		}
+	}
+}
+
+func TestDoctorNextStepsAreClientOriented(t *testing.T) {
+	steps := strings.Join(doctorNextSteps(&healthResult{InstanceRole: "primary"}), "\n")
+	if !strings.Contains(steps, "demand list") || !strings.Contains(steps, "demand apply") ||
+		strings.Contains(steps, "local DB") {
+		t.Fatalf("primary next steps are not remote-client oriented: %s", steps)
+	}
+}
+
 func TestDoctorCommandAuthFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -589,7 +715,7 @@ func TestDoctorCommandAuthFailure(t *testing.T) {
 				"status":  "ok",
 				"ts":      "2026-07-01T00:00:00Z",
 			})
-		case "/api/items":
+		case "/api/auth/write-check":
 			w.WriteHeader(http.StatusUnauthorized)
 			io.WriteString(w, `{"error":"unauthorized"}`)
 		default:
@@ -618,14 +744,14 @@ func TestDoctorCommandAuthFailure(t *testing.T) {
 }
 
 func TestDoctorCommandHealthFailureSkipsAuthProbe(t *testing.T) {
-	var sawItems bool
+	var sawWriteCheck bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/health":
 			w.WriteHeader(http.StatusServiceUnavailable)
 			io.WriteString(w, `{"error":"starting"}`)
-		case "/api/items":
-			sawItems = true
+		case "/api/auth/write-check":
+			sawWriteCheck = true
 			w.WriteHeader(http.StatusOK)
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
@@ -639,7 +765,7 @@ func TestDoctorCommandHealthFailureSkipsAuthProbe(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected doctor health failure")
 	}
-	if sawItems {
+	if sawWriteCheck {
 		t.Fatal("doctor should not run auth probe when health fails")
 	}
 	if stdout != "" {
@@ -794,6 +920,35 @@ func TestDBBackupJSONAndRefuseOverwrite(t *testing.T) {
 	}
 	if !strings.Contains(stderr2, "\"error\"") {
 		t.Fatalf("expected JSON error on stderr, got %q", stderr2)
+	}
+}
+
+func TestDBGzipBackupAndCompact(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "wall.db")
+	if _, _, err := captureCommandOutput(t, func() error {
+		return run([]string{"db", "info", "--db", dbPath, "--json"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "wall.db.gz")
+	if _, _, err := captureCommandOutput(t, func() error {
+		return run([]string{"db", "backup", "--db", dbPath, "--out", out, "--gzip", "--json"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(file, header); err != nil || header[0] != 0x1f || header[1] != 0x8b {
+		t.Fatalf("gzip header = %x, err=%v", header, err)
+	}
+	if _, _, err := captureCommandOutput(t, func() error {
+		return run([]string{"db", "compact", "--db", dbPath, "--yes", "--json"})
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

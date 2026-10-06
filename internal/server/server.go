@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -18,23 +19,34 @@ import (
 	"sync"
 	"time"
 
-	"github.com/infowall/infowall/internal/conversationingest"
 	"github.com/infowall/infowall/internal/feed"
 	"github.com/infowall/infowall/internal/feishuingest"
 	"github.com/infowall/infowall/internal/feishusync"
+	"github.com/infowall/infowall/internal/integration"
 	"github.com/infowall/infowall/internal/parser"
 	"github.com/infowall/infowall/internal/store"
 )
 
 // Config holds server options.
 type Config struct {
-	Addr        string
-	DBPath      string
-	Dev         bool   // true → proxy frontend to Vite dev server on :5173
-	APIKey      string // optional; if set, requests must carry Authorization: Bearer <key> or ?key=<key>
-	DistFS      fs.FS  // embedded production frontend (ignored in Dev mode)
-	DefaultView string // "infowall" or "workbench"; used when the browser URL has no valid hash route
+	Addr                     string
+	DBPath                   string
+	Dev                      bool   // true → proxy frontend to Vite dev server on :5173
+	APIKey                   string // optional; if set, mutations must carry Authorization: Bearer <key>
+	DistFS                   fs.FS  // embedded production frontend (ignored in Dev mode)
+	DefaultView              string // "infowall" or "workbench"; used when the browser URL has no valid hash route
+	DisableBackgroundWorkers bool   // serve stored data without automatic Feishu sync or activity scans
+	ReadOnly                 bool   // reject API mutations for a mirror instance
+	InstanceRole             string // primary, mirror, or development; exposed for agent discovery
+	BuildVersion             string // injected by the CLI build
+	BuildCommit              string // injected by the CLI build
+	// Integrations selects the process integration composition. Nil preserves
+	// the legacy built-in Feishu, command enrichment, analyzer, and document
+	// sync behavior. A non-nil empty value runs the core server without any
+	// integration adapters; otherwise only the supplied components are used.
+	Integrations *integration.Components
 
+	// Legacy integration settings are honored only when Integrations is nil.
 	// LarkRunner is injectable for tests. Production uses lark-cli from PATH.
 	LarkRunner         feishusync.CommandRunner
 	IngestionCollector feishuingest.Collector
@@ -55,7 +67,8 @@ type Server struct {
 	hub   *feed.Hub
 	mux   *http.ServeMux
 
-	feishuClient feishusync.Client
+	integrations integration.Components
+	feishuClient *feishusync.Client
 	syncWorker   *feishusync.Worker
 	ingestWorker *feishuingest.Worker
 	syncCancel   context.CancelFunc
@@ -91,6 +104,16 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	if cfg.InstanceRole == "" {
+		cfg.InstanceRole = "primary"
+	}
+	if cfg.InstanceRole != "primary" && cfg.InstanceRole != "mirror" && cfg.InstanceRole != "development" {
+		return nil, fmt.Errorf("invalid instance role %q (want primary, mirror, or development)", cfg.InstanceRole)
+	}
+	resolved, err := resolveIntegrations(cfg)
+	if err != nil {
+		return nil, err
+	}
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
 		return nil, fmt.Errorf("open database %s: %w", cfg.DBPath, err)
@@ -115,53 +138,14 @@ func New(ctx context.Context, cfg Config) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{
-		cfg:   cfg,
-		store: st,
-		hub:   feed.NewHub(),
-		mux:   http.NewServeMux(),
+		cfg:          cfg,
+		store:        st,
+		hub:          feed.NewHub(),
+		mux:          http.NewServeMux(),
+		integrations: resolved.components,
 	}
-	syncRunner := cfg.LarkRunner
-	if syncRunner == nil {
-		syncRunner = feishusync.ExecRunner{}
-	}
-	s.feishuClient = feishusync.Client{Runner: syncRunner}
-	s.syncWorker = feishusync.NewWorker(&feishuBackend{store: st}, s.feishuClient)
-	s.syncWorker.OnUpdate = s.broadcastFeishuSyncState
-	ingestionRunner := cfg.LarkRunner
-	if ingestionRunner == nil {
-		ingestionRunner = feishusync.ExecRunner{Timeout: defaultIngestionLarkTimeout}
-	}
-	collector := cfg.IngestionCollector
-	if collector == nil {
-		collector = feishuingest.LarkCollector{Runner: ingestionRunner}
-	}
-	analyzer := cfg.IngestionAnalyzer
-	if analyzer == nil {
-		analyzer = feishuingest.FallbackAnalyzer{
-			Primary: feishuingest.Claude0821Analyzer{Path: cfg.ClaudePath, PresetsPath: cfg.ClaudePresetsPath,
-				Preset: cfg.ClaudePreset, Timeout: cfg.ClaudeTimeout},
-			Fallback: feishuingest.CodexAnalyzer{Path: cfg.CodexPath, CWD: cfg.CodexCWD, Timeout: cfg.CodexTimeout},
-		}
-	}
-	s.ingestWorker = feishuingest.NewWorker(&ingestionBackend{store: st}, collector, analyzer)
-	s.ingestWorker.Enricher = feishuingest.CommandEnricher{LarkRunner: ingestionRunner}
-	s.ingestWorker.LocalCollector = localConversationCollector{store: st, stateDir: conversationingest.DefaultStateDir()}
-	s.ingestWorker.OnUpdate = s.broadcastFeishuIngestionState
-	workerContext := ctx
-	if workerContext == nil {
-		workerContext = context.Background()
-	}
-	workerContext, s.syncCancel = context.WithCancel(workerContext)
-	s.syncWG.Add(1)
-	go func() {
-		defer s.syncWG.Done()
-		s.syncWorker.Run(workerContext)
-	}()
-	s.syncWG.Add(1)
-	go func() {
-		defer s.syncWG.Done()
-		s.ingestWorker.Run(workerContext)
-	}()
+	s.wireIntegrations(resolved)
+	s.startIntegrationWorkers(ctx)
 	s.routes()
 	return s, nil
 }
@@ -179,46 +163,49 @@ func (s *Server) Close() error {
 }
 
 func (s *Server) routes() {
-	api := chain(s.logRequest, s.auth)
+	read := s.logRequest
+	write := chain(s.logRequest, s.requireWriteAuth)
 
-	s.mux.HandleFunc("GET /api/health", s.logRequest(s.handleHealth))
-	s.mux.HandleFunc("GET /api/config", s.logRequest(s.handleFrontendConfig))
-	s.mux.HandleFunc("PATCH /api/config", api(s.handleUpdateFrontendConfig))
-	s.mux.HandleFunc("GET /api/items", api(s.handleListItems))
-	s.mux.HandleFunc("GET /api/items/{id}", api(s.handleGetItem))
-	s.mux.HandleFunc("POST /api/items", api(s.handleCreateItem))
-	s.mux.HandleFunc("POST /api/items/{id}/pin", api(s.handlePinItem))
-	s.mux.HandleFunc("DELETE /api/items/{id}", api(s.handleDeleteItem))
-	s.mux.HandleFunc("GET /api/demands", api(s.handleListDemands))
-	s.mux.HandleFunc("POST /api/demands", api(s.handleCreateDemand))
-	s.mux.HandleFunc("POST /api/demands/import", api(s.handleImportDemands))
-	s.mux.HandleFunc("GET /api/demands/{id}", api(s.handleGetDemand))
-	s.mux.HandleFunc("PATCH /api/demands/{id}", api(s.handlePatchDemand))
-	s.mux.HandleFunc("POST /api/demands/{id}/progress", api(s.handleAddDemandProgress))
-	s.mux.HandleFunc("GET /api/projects", api(s.handleListProjects))
-	s.mux.HandleFunc("POST /api/projects", api(s.handleCreateProject))
-	s.mux.HandleFunc("GET /api/projects/{id}", api(s.handleGetProject))
-	s.mux.HandleFunc("PATCH /api/projects/{id}", api(s.handlePatchProject))
-	s.mux.HandleFunc("GET /api/integrations/feishu-doc", api(s.handleGetFeishuDoc))
-	s.mux.HandleFunc("POST /api/integrations/feishu-doc", api(s.handleSetupFeishuDoc))
-	s.mux.HandleFunc("DELETE /api/integrations/feishu-doc", api(s.handleDisableFeishuDoc))
-	s.mux.HandleFunc("POST /api/integrations/feishu-doc/sync", api(s.handleSyncFeishuDoc))
-	s.mux.HandleFunc("GET /api/integrations/feishu-chat", api(s.handleGetFeishuChat))
-	s.mux.HandleFunc("PATCH /api/integrations/feishu-chat", api(s.handlePatchFeishuChat))
-	s.mux.HandleFunc("POST /api/integrations/feishu-chat/scan", api(s.handleScanFeishuChat))
-	s.mux.HandleFunc("GET /api/integrations/feishu-chat/runs", api(s.handleListFeishuChatRuns))
-	s.mux.HandleFunc("POST /api/integrations/conversations/events", api(s.handlePutConversationHookEvent))
+	s.mux.HandleFunc("GET /api/health", read(s.handleHealth))
+	s.mux.HandleFunc("GET /api/capabilities", read(s.handleCapabilities))
+	s.mux.HandleFunc("POST /api/auth/write-check", write(s.handleWriteAuthCheck))
+	s.mux.HandleFunc("GET /api/config", read(s.handleFrontendConfig))
+	s.mux.HandleFunc("PATCH /api/config", write(s.handleUpdateFrontendConfig))
+	s.mux.HandleFunc("GET /api/items", read(s.handleListItems))
+	s.mux.HandleFunc("GET /api/items/{id}", read(s.handleGetItem))
+	s.mux.HandleFunc("POST /api/items", write(s.handleCreateItem))
+	s.mux.HandleFunc("POST /api/items/{id}/pin", write(s.handlePinItem))
+	s.mux.HandleFunc("DELETE /api/items/{id}", write(s.handleDeleteItem))
+	s.mux.HandleFunc("GET /api/demands", read(s.handleListDemands))
+	s.mux.HandleFunc("POST /api/demands", write(s.handleCreateDemand))
+	s.mux.HandleFunc("POST /api/demands/import", write(s.handleImportDemands))
+	s.mux.HandleFunc("GET /api/demands/{id}", read(s.handleGetDemand))
+	s.mux.HandleFunc("PATCH /api/demands/{id}", write(s.handlePatchDemand))
+	s.mux.HandleFunc("POST /api/demands/{id}/progress", write(s.handleAddDemandProgress))
+	s.mux.HandleFunc("GET /api/projects", read(s.handleListProjects))
+	s.mux.HandleFunc("POST /api/projects", write(s.handleCreateProject))
+	s.mux.HandleFunc("GET /api/projects/{id}", read(s.handleGetProject))
+	s.mux.HandleFunc("PATCH /api/projects/{id}", write(s.handlePatchProject))
+	s.mux.HandleFunc("GET /api/integrations/feishu-doc", read(s.handleGetFeishuDoc))
+	s.mux.HandleFunc("POST /api/integrations/feishu-doc", write(s.handleSetupFeishuDoc))
+	s.mux.HandleFunc("DELETE /api/integrations/feishu-doc", write(s.handleDisableFeishuDoc))
+	s.mux.HandleFunc("POST /api/integrations/feishu-doc/sync", write(s.handleSyncFeishuDoc))
+	s.mux.HandleFunc("GET /api/integrations/feishu-chat", read(s.handleGetFeishuChat))
+	s.mux.HandleFunc("PATCH /api/integrations/feishu-chat", write(s.handlePatchFeishuChat))
+	s.mux.HandleFunc("POST /api/integrations/feishu-chat/scan", write(s.handleScanFeishuChat))
+	s.mux.HandleFunc("GET /api/integrations/feishu-chat/runs", read(s.handleListFeishuChatRuns))
+	s.mux.HandleFunc("POST /api/integrations/conversations/events", write(s.handlePutConversationHookEvent))
 	// Unified aliases keep the original Feishu CLI/API contract compatible.
-	s.mux.HandleFunc("GET /api/integrations/activity", api(s.handleGetFeishuChat))
-	s.mux.HandleFunc("PATCH /api/integrations/activity", api(s.handlePatchFeishuChat))
-	s.mux.HandleFunc("POST /api/integrations/activity/scan", api(s.handleScanFeishuChat))
-	s.mux.HandleFunc("GET /api/integrations/activity/runs", api(s.handleListFeishuChatRuns))
-	s.mux.HandleFunc("GET /api/demand-reviews", api(s.handleListDemandReviews))
-	s.mux.HandleFunc("POST /api/demand-reviews/{id}/accept", api(s.handleAcceptDemandReview))
-	s.mux.HandleFunc("POST /api/demand-reviews/{id}/dismiss", api(s.handleDismissDemandReview))
+	s.mux.HandleFunc("GET /api/integrations/activity", read(s.handleGetFeishuChat))
+	s.mux.HandleFunc("PATCH /api/integrations/activity", write(s.handlePatchFeishuChat))
+	s.mux.HandleFunc("POST /api/integrations/activity/scan", write(s.handleScanFeishuChat))
+	s.mux.HandleFunc("GET /api/integrations/activity/runs", read(s.handleListFeishuChatRuns))
+	s.mux.HandleFunc("GET /api/demand-reviews", read(s.handleListDemandReviews))
+	s.mux.HandleFunc("POST /api/demand-reviews/{id}/accept", write(s.handleAcceptDemandReview))
+	s.mux.HandleFunc("POST /api/demand-reviews/{id}/dismiss", write(s.handleDismissDemandReview))
 
-	// SSE endpoint: same auth as API (accepts ?key= for EventSource), also logged.
-	s.mux.HandleFunc("GET /events", s.logRequest(s.auth(s.handleEvents)))
+	// SSE carries the same read-only representation as the public GET API.
+	s.mux.HandleFunc("GET /events", read(s.handleEvents))
 
 	if s.cfg.Dev {
 		proxy := devProxy("http://localhost:5173")
@@ -260,6 +247,13 @@ func (s *Server) routes() {
 
 // ListenAndServe starts the HTTP server. It blocks until the server shuts down.
 func (s *Server) ListenAndServe() error {
+	return s.ListenAndServeContext(context.Background())
+}
+
+// ListenAndServeContext starts the HTTP server and drains it when ctx is
+// cancelled. Service managers can therefore stop the process without cutting
+// off in-flight SQLite-backed requests.
+func (s *Server) ListenAndServeContext(ctx context.Context) error {
 	srv := &http.Server{
 		Addr:         s.cfg.Addr,
 		Handler:      s.mux,
@@ -268,17 +262,72 @@ func (s *Server) ListenAndServe() error {
 		IdleTimeout:  60 * time.Second,
 	}
 	log.Printf("infowall listening on %s (dev=%v, db=%s, default_view=%s)", s.cfg.Addr, s.cfg.Dev, s.cfg.DBPath, s.cfg.DefaultView)
-	return srv.ListenAndServe()
+	result := make(chan error, 1)
+	go func() { result <- srv.ListenAndServe() }()
+	select {
+	case err := <-result:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownContext); err != nil {
+			return fmt.Errorf("shutdown HTTP server: %w", err)
+		}
+		if err := <-result; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	}
 }
 
 // --- handlers ---
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"service": "infowall",
-		"status":  "ok",
-		"ts":      time.Now().UTC(),
+		"ok":             true,
+		"service":        "infowall",
+		"status":         "ok",
+		"version":        s.cfg.BuildVersion,
+		"commit":         s.cfg.BuildCommit,
+		"api_version":    "1",
+		"instance_role":  s.cfg.InstanceRole,
+		"read_only":      s.cfg.ReadOnly,
+		"schema_version": store.SchemaVersion(),
+		"ts":             time.Now().UTC(),
+	})
+}
+
+func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
+	writeAuth := "none"
+	if s.cfg.APIKey != "" {
+		writeAuth = "bearer"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"service":            "infowall",
+		"api_version":        "1",
+		"version":            s.cfg.BuildVersion,
+		"commit":             s.cfg.BuildCommit,
+		"instance_role":      s.cfg.InstanceRole,
+		"read_only":          s.cfg.ReadOnly,
+		"background_workers": !s.cfg.DisableBackgroundWorkers && (s.syncWorker != nil || s.ingestWorker != nil),
+		"schema_version":     store.SchemaVersion(),
+		"read_access":        "public",
+		"write_auth":         writeAuth,
+		"sse_access":         "public",
+		"features": []string{
+			"agent-spec-v12", "demand-apply", "structured-errors",
+			"progress-links", "sse",
+		},
+	})
+}
+
+func (s *Server) handleWriteAuthCheck(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":               true,
+		"write_authorized": true,
 	})
 }
 
@@ -560,12 +609,17 @@ func (s *Server) logRequest(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// auth is middleware for API and SSE endpoints, requiring a Bearer token or ?key=
-// query parameter when Config.APIKey is set.
-func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
+// requireWriteAuth protects mutation endpoints with a Bearer token when an API
+// key is configured. Read-only instances reject mutations even with a valid key.
+func (s *Server) requireWriteAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.checkKey(r) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
 			writeErr(w, http.StatusUnauthorized, errors.New("unauthorized"))
+			return
+		}
+		if s.cfg.ReadOnly && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+			writeErr(w, http.StatusForbidden, errors.New("read-only mirror"))
 			return
 		}
 		next(w, r)
@@ -576,14 +630,12 @@ func (s *Server) checkKey(r *http.Request) bool {
 	if s.cfg.APIKey == "" {
 		return true
 	}
-	token := ""
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		token = strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+	scheme, token, ok := strings.Cut(strings.TrimSpace(r.Header.Get("Authorization")), " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
+		return false
 	}
-	if token == "" {
-		token = strings.TrimSpace(r.URL.Query().Get("key"))
-	}
-	return token == s.cfg.APIKey
+	token = strings.TrimSpace(token)
+	return subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.APIKey)) == 1
 }
 
 type responseWriter struct {
@@ -635,6 +687,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErr(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]any{"error": err.Error()})
+}
+
+func writeIntegrationUnavailable(w http.ResponseWriter, message string) {
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error":      message,
+		"error_code": "integration_unavailable",
+	})
 }
 
 func intParam(s string, def, min, max int) int {

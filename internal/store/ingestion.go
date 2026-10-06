@@ -434,6 +434,9 @@ func (s *Store) CompleteFeishuIngestion(ctx context.Context, commit model.Feishu
 	if err := updateConversationWatermarksTx(ctx, tx, commit.WindowEnd); err != nil {
 		return nil, err
 	}
+	if _, err := pruneTransientDataTx(ctx, tx, now); err != nil {
+		return nil, fmt.Errorf("prune transient ingestion data: %w", err)
+	}
 	var backfill any
 	if commit.BackfillAt != nil {
 		backfill = commit.BackfillAt.UTC()

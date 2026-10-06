@@ -25,7 +25,12 @@ infowall is a single-binary personal information wall: a feed of markdown cards
 rendered in reverse-chronological order in the browser. New items arrive over a
 Server-Sent Events stream so the wall updates live. The server is one Go binary
 with the production React/Vite frontend embedded via `//go:embed`, backed by
-SQLite. No external services, no accounts.
+SQLite. The core requires no external service or account. Optional integrations
+implement vendor-neutral in-process `connector`, `enricher`, `analyzer`, or
+`exporter` contracts; a zero-integration server is valid. Built-in Feishu,
+Codebase, Claude, and Codex paths are compatibility adapters, not core
+dependencies. This phase does not provide an external HTTP plugin protocol,
+dynamic loading, or hot reload.
 
 For end-user docs (CLI reference, content formats, full HTTP API, SSE event
 shapes) read [`README.md`](README.md). This guide is for people and agents
@@ -109,7 +114,12 @@ Frontend (from `web/`):
 
 Run the server:
 
-- Production: `./bin/infowall serve --addr 127.0.0.1:8899 --db "$HOME/Library/Application Support/infowall/personal-workbench.db"`
+- Local production: `./bin/infowall serve --addr 127.0.0.1:8899 --db
+  "$HOME/Library/Application Support/infowall/personal-workbench.db"`.
+- Remote primary: run the same binary with one explicit persistent database,
+  publish it through a controlled HTTPS endpoint, and require an API key. Keep
+  endpoint, host, port, database, and secret values in local configuration; do
+  not commit them.
 - Dev (two terminals): `make web-dev` in one, and
   `go run -tags dev ./cmd/infowall serve --dev` in the other. `--dev` proxies
   `/` to the Vite dev server instead of serving the embedded build.
@@ -152,6 +162,7 @@ infowall/
 │   ├── parser/          markdown + YAML frontmatter parser (goldmark) + tests
 │   ├── store/           SQLite store (modernc.org/sqlite)
 │   ├── feed/            in-process pub/sub hub broadcasting SSE events
+│   ├── integration/     vendor-neutral in-process extension contracts
 │   └── model/           Item type + known content-type constants
 ├── web/                 Vite + React + TypeScript frontend
 │   └── src/
@@ -174,6 +185,7 @@ infowall/
 | Change how markdown/frontmatter is parsed | `internal/parser/parser.go`, `internal/parser/parser_test.go` |
 | Change persistence / schema | `internal/store/store.go` |
 | Change SSE broadcast / subscriber fan-out | `internal/feed/hub.go` |
+| Change integration contracts / composition | `internal/integration/`; keep vendor adapters outside the core package |
 | Add a field to items / a new content type | `internal/model/item.go`, parser, `web/src/lib/types.ts`, a renderer + `web/src/components/renderers/registry.ts` |
 | Add/modify a frontend card renderer | `web/src/components/renderers/*.tsx`, `registry.ts`, `web/src/components/feed/iconMap.ts` |
 | Change the SSE client / feed state | `web/src/hooks/useFeed.ts`, `web/src/lib/api.ts` |
@@ -226,7 +238,7 @@ precedence over env vars**:
 | `INFOWALL_URL` | `http://localhost:8899` | CLI | Server base URL for `push`/`list` |
 | `INFOWALL_API_KEY` | *(unset)* | CLI & server | Shared secret for API auth |
 | `INFOWALL_ADDR` | `:8899` | `serve` | Listen address (overridden by `--addr`) |
-| `INFOWALL_DB` | `infowall.db` (CLI fallback only) | `serve` / `db info` / `db backup` | SQLite path (overridden by `--db`). This workstation's production value is `$HOME/Library/Application Support/infowall/personal-workbench.db`; always pass it explicitly for persistent use. |
+| `INFOWALL_DB` | `infowall.db` (CLI fallback only) | `serve` / `db info` / `db backup` | SQLite path (overridden by `--db`); production deployments must set an explicit persistent path outside the worktree. |
 
 When `INFOWALL_API_KEY` / `--api-key` is set, **all writes and the SSE stream**
 require either `Authorization: Bearer <key>` or `?key=<key>` (the query form is
@@ -234,34 +246,35 @@ for `EventSource`, which cannot set headers). The SQLite DB file and the
 `bin/`, `web/dist`, and `cmd/infowall/dist` build artifacts are generated and
 git-ignored — do not commit them.
 
-## Canonical DB & Running the Production Server
+## Persistent DB & Running a Primary
 
-The production server for daily use runs on port **`:8899`** against the
-canonical personal-workbench SQLite database at
-**`$HOME/Library/Application Support/infowall/personal-workbench.db`**. The
-built-in `infowall.db` default is a current-directory CLI fallback only; never
-use it for persistent serving on this workstation. This is the single
-persistent wall of cards — do not casually replace it.
+Every installation must designate exactly one writable primary. It may run
+locally or on a remote host, but endpoint, host, port, database, and secret
+values are installation-specific configuration and must not be committed. The
+built-in `infowall.db` value is a current-directory fallback only; use an
+explicit path outside the worktree for persistent serving.
 
-- **Starting the production server.** From the project root, run
-  `./bin/infowall serve --addr 127.0.0.1:8899 --db "$HOME/Library/Application Support/infowall/personal-workbench.db"`.
-  Keep the database path explicit in every service manager, health check, and
-  backup command.
-- **Before starting, check nothing is already on :8899.** Run
+- **Verify a remote primary before writing.** Point `INFOWALL_URL` at the
+  operator-provided HTTPS endpoint and provide `INFOWALL_API_KEY`. Confirm
+  `infowall health --json` and `infowall doctor --json` before changing data.
+- **Keep deployment values local.** Put service-manager settings, reverse-proxy
+  configuration, database paths, and secrets in private local configuration.
+- **Do not start a retained recovery copy as another writer.** A copied SQLite
+  file does not synchronize with the selected primary. Freeze writes and
+  reconcile data before an intentional migration or recovery cutover.
+- **Before a local start, check nothing is already on :8899.** Run
   `lsof -iTCP:8899 -sTCP:LISTEN`. If a server is already running, do not
   start a second one — either reuse it or stop it explicitly (`kill <pid>`)
   before starting a fresh binary. Two servers on the same port will race;
   whichever bound first keeps the port and the second fails (or silently
   binds a different address).
 - **Never use `/tmp/infowall-*.db` for the persistent wall.** `/tmp/` paths
-  are for throwaway smoke tests and scratch servers (use ports like
-  `:18899` / `:19999` and a random `/tmp/infowall-test-*.db` for those, and
-  kill them when done). Anything under `/tmp/` can be deleted by the OS or
+  are for throwaway smoke tests and scratch servers on any free non-production
+  port; kill them when done. Anything under `/tmp/` can be deleted by the OS or
   by other agents.
-- **Do not overwrite `personal-workbench.db`.** When rebuilding the binary
-  after a code change, kill the running server, run `make build`, then restart
-  with the same explicit `--db` path — the existing database is preserved
-  across restarts (it is not recreated). The only ways to wipe the wall are:
+- **Do not overwrite the selected primary database.** When rebuilding the
+  binary, deploy it separately from the database and restart on the same
+  explicit `--db` path. The only ways to wipe the wall are:
   (a) user explicitly asks for it, (b) running `rm` on the database yourself
   (do not), or (c) running a smoke-test server pointed at a throwaway
   `/tmp/...db` (fine).
@@ -270,10 +283,9 @@ persistent wall of cards — do not casually replace it.
   the user asks for it or you are running an isolated test. Doing so
   silently swaps out the wall and makes the user think their data is gone.
 - **CLI `db info` / `db backup` default to the current-directory fallback**
-  `infowall.db` unless `--db` is supplied. For the personal workbench, always
-  pass `$HOME/Library/Application Support/infowall/personal-workbench.db`.
-  Backups go to a user-specified path via VACUUM INTO and never overwrite an
-  existing file.
+  `infowall.db` unless `--db` is supplied. Always pass the installation's
+  explicit persistent path. Backups go to a user-specified path via VACUUM INTO
+  and never overwrite an existing file.
 
 For a dev/frontend-only session (HMR, no embedded frontend), use two
 terminals as described under [Commands](#commands): `cd web && npm run dev`
@@ -289,12 +301,11 @@ is gone".
 - **No direct work on `main`**: always create a worktree + feature branch first.
   Even small fixes and doc changes go through a worktree. See
   [Mandatory Workflow](#mandatory-workflow). This is RULE #1.
-- **Don't clobber the persistent wall.** The production server on :8899 uses
-  `$HOME/Library/Application Support/infowall/personal-workbench.db`; do not
-  start a second server on that port, do not point it at a throwaway
-  `/tmp/...db`, and do not remove the database unless the user explicitly asks
-  to wipe data. Read
-  [Canonical DB & Running the Production Server](#canonical-db--running-the-production-server).
+- **Don't clobber or fork the persistent wall.** Keep one writable primary on
+  its explicit persistent database. Do not start a copied database as another
+  writer, point production at a throwaway `/tmp/...db`, or remove a database
+  unless the user explicitly asks to wipe data. Read
+  [Persistent DB & Running a Primary](#persistent-db--running-a-primary).
 - **Dev vs. embedded frontend**: production builds embed `cmd/infowall/dist`
   through `dist_prod.go` (`//go:build !dev`). Building or running with
   `-tags dev` switches to `dist_dev.go`, which serves nothing — you **must**
@@ -306,6 +317,10 @@ is gone".
 - **API-key gating includes SSE**: if you add a write endpoint or a new event
   stream, route it through the same auth check; missing the SSE path is an easy
   miss.
+- **Integration boundaries are in-process in this phase**: keep core business
+  state independent of vendor SDKs and implement external systems through the
+  neutral roles. Do not document or infer HTTP plugins, hot loading, or dynamic
+  discovery until those lifecycle and security contracts exist.
 - **Type ↔ model drift**: a new content type touches four places — the Go model
   constants, the parser, the TS `Item` type, and a registered renderer. Update
   all four together.

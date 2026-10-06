@@ -182,6 +182,46 @@ func TestAbandonedConversationHookBodiesExpireAfter24Hours(t *testing.T) {
 	}
 }
 
+func TestPruneTransientDataKeepsBusinessRecordsAndRecentTombstones(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	demand := &model.Demand{ID: "business-demand", Title: "保留业务需求", Status: model.DemandStatusPending, Priority: model.DemandPriorityNone}
+	if _, err := st.CreateDemand(ctx, demand); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range []model.ConversationHookEvent{
+		{ID: "old-hook", Source: "codex", EventName: "Stop", SessionID: "old-session", OccurredAt: now.Add(-10 * 24 * time.Hour)},
+		{ID: "recent-hook", Source: "codex", EventName: "Stop", SessionID: "recent-session", OccurredAt: now.Add(-time.Hour)},
+		{ID: "pending-hook", Source: "codex", EventName: "Stop", SessionID: "pending-session", OccurredAt: now.Add(-10 * 24 * time.Hour)},
+	} {
+		if _, err := st.PutConversationHookEvent(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := st.db.ExecContext(ctx, `UPDATE conversation_hook_events SET processed_at = ? WHERE id = 'old-hook'`, now.Add(-8*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.ExecContext(ctx, `UPDATE conversation_hook_events SET processed_at = ? WHERE id = 'recent-hook'`, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	result, err := st.PruneTransientData(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.HookEvents != 1 {
+		t.Fatalf("pruned hooks = %d, want 1", result.HookEvents)
+	}
+	var hooks int
+	if err := st.db.QueryRowContext(ctx, `SELECT count(*) FROM conversation_hook_events`).Scan(&hooks); err != nil || hooks != 2 {
+		t.Fatalf("remaining hooks = %d, err=%v", hooks, err)
+	}
+	demands, err := st.ListDemands(ctx, DemandListOptions{})
+	if err != nil || len(demands) != 1 || demands[0].ID != demand.ID {
+		t.Fatalf("business demand changed: %+v err=%v", demands, err)
+	}
+}
+
 func TestFeishuIngestionResumePointIsOneTime(t *testing.T) {
 	st := openTemp(t)
 	ctx := context.Background()

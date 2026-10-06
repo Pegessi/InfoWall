@@ -25,6 +25,7 @@ type Message struct {
 	Deleted     bool                 `json:"deleted"`
 	Mentions    []Mention            `json:"mentions,omitempty"`
 	SourceKind  string               `json:"source_kind,omitempty"`
+	ConnectorID string               `json:"-"`
 	SessionID   string               `json:"session_id,omitempty"`
 	TurnID      string               `json:"turn_id,omitempty"`
 	CWD         string               `json:"cwd,omitempty"`
@@ -52,14 +53,23 @@ type Snapshot struct {
 }
 
 type Resource struct {
-	Kind       string `json:"kind"`
-	ExternalID string `json:"external_id"`
-	URL        string `json:"url"`
-	Title      string `json:"title,omitempty"`
-	State      string `json:"state,omitempty"`
-	Excerpt    string `json:"excerpt,omitempty"`
-	DedupeKey  string `json:"dedupe_key"`
-	Accessible bool   `json:"accessible"`
+	Kind            string                   `json:"kind"`
+	ExternalID      string                   `json:"external_id"`
+	URL             string                   `json:"url"`
+	Title           string                   `json:"title,omitempty"`
+	State           string                   `json:"state,omitempty"`
+	Excerpt         string                   `json:"excerpt,omitempty"`
+	DedupeKey       string                   `json:"dedupe_key"`
+	Accessible      bool                     `json:"accessible"`
+	ObservationRefs []ResourceObservationRef `json:"-"`
+}
+
+// ResourceObservationRef identifies the collected message associated with a
+// resource. It is an in-process sidecar and is intentionally absent from the
+// legacy analyzer JSON contract.
+type ResourceObservationRef struct {
+	ConnectorID string
+	ExternalID  string
 }
 
 type AnalysisInput struct {

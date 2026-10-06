@@ -9,9 +9,36 @@ render live candlestick charts inline — and new items arrive over a
 Server-Sent Events stream so the wall updates in real time.
 
 The server is a Go binary with an embedded React/Vite frontend (production
-build is a single ~12MB file) backed by SQLite. No external dependencies, no
-accounts, no cloud. Run it on a laptop or a cheap VPS, `curl` or `infowall
+build is a single ~12MB file) backed by SQLite. The core requires no external
+service or account. Run it on a laptop or a cheap VPS, `curl` or `infowall
 push` items into it, and pin the tab.
+
+---
+
+## Core and integrations
+
+InfoWall's core owns SQLite persistence, the HTTP/SSE API, authentication, and
+business state for feed items, projects, demands, progress, sources, and
+reviews. External systems are optional integrations around that core.
+
+The vendor-neutral in-process contract defines four roles:
+
+| Role | Contract |
+| --- | --- |
+| **Connector** | Collect normalized observations from an external source. |
+| **Enricher** | Resolve additional resources and context referenced by observations. |
+| **Analyzer** | Propose demand, progress, and review changes from a normalized batch and a bounded core snapshot. |
+| **Exporter** | Publish a core workbench snapshot to an external destination. |
+
+A process may configure any applicable components, and configuring none is a
+valid deployment: the browser, CLI, HTTP API, SQLite state, and manual writes
+continue to work without adapters. Existing Feishu, Codebase, Claude, and
+Codex behavior remains available as optional built-in compatibility adapters;
+those product names are not part of the neutral contract.
+
+The first implementation composes Go components when the server is
+constructed. It does not yet define an external HTTP integration transport,
+executable plugin discovery, dynamic loading, or hot reload.
 
 ---
 
@@ -59,8 +86,8 @@ truth; the browser and CLI both update it through the local API:
   --link "https://example.test/jobrun/123" --json
 
 # Named resource links can carry type, title, state, and a stable identity.
-./bin/infowall demand progress DEMAND_ID --text "Trial 已进入 RUNNING" \
-  --links '[{"kind":"trial","external_id":"394541347","title":"MIX 验收 Trial 394541347","url":"https://example.test/trial/394541347","state":"RUNNING","dedupe_key":"trial:394541347"}]' --json
+./bin/infowall demand progress DEMAND_ID --text "Deployment is running" \
+  --links '[{"kind":"deployment","external_id":"run-123","title":"Deployment run","url":"https://deployments.example.invalid/run-123","state":"RUNNING","dedupe_key":"deployment:run-123"}]' --json
 
 # Create the one-way Feishu mirror, or bind an existing document URL.
 ./bin/infowall sync feishu setup --create --json
@@ -81,19 +108,38 @@ the preferred retry-safe write path. JSON failures keep stdout empty and add
 stable `error_code`, `retryable`, `http_status`, and recovery `hint` fields on
 stderr.
 
-The repository also contains the Codex skill at
+For a remote primary, keep one authoritative SQLite service, put it behind a
+controlled HTTPS endpoint, and require an API key. Endpoint, database, and
+secret values are installation-local configuration and must not be committed:
+
+```bash
+export INFOWALL_URL=https://infowall.example.invalid
+export INFOWALL_API_KEY=replace-with-a-long-random-secret
+infowall health --json
+infowall doctor --json
+infowall demand apply --input candidates.json --json
+```
+
+Do not run another writable copy of the database and assume it will reconcile.
+Keep the primary's database path explicit, back it up independently, and use a
+private network or authenticated reverse proxy whenever the service leaves
+loopback.
+
+The repository also contains an optional Codex compatibility skill at
 `skills/infowall-demand`. Install it by linking that directory into
 `${CODEX_HOME:-$HOME/.codex}/skills/infowall-demand`; it scans Feishu messages
 on demand, retains only demand evidence, and imports candidates through the
-running local service.
+running service. Core operation does not require the skill.
 
-### Automatic activity ingestion
+### Optional built-in compatibility adapters
 
-InfoWall can reconcile Feishu messages and completed local Codex/Claude turns
-every 30 minutes from 09:00 through 23:00 in `Asia/Shanghai`. Each source uses
-a persisted success watermark with a five-minute overlap; first enablement or
-recovery reads at most the latest 12 hours. An empty increment never starts a
-model.
+For existing installations, InfoWall can compose its built-in Feishu connector
+and exporter, Codebase enrichment, and Claude/Codex analyzer paths. This
+compatibility composition can reconcile Feishu messages and completed local
+Codex/Claude turns every 30 minutes from 09:00 through 23:00 in
+`Asia/Shanghai`. Each source uses a persisted success watermark with a
+five-minute overlap; first enablement or recovery reads at most the latest 12
+hours. An empty increment never starts a model. These adapters are optional.
 
 Install the local lifecycle hooks once, then enable the built-in scheduler:
 
@@ -120,7 +166,7 @@ terminal output, and full transcripts are excluded. The summary runner reads
 file-backed bounded inputs with only `Read`/`Glob`; local Codex and Claude
 events may update existing demands or enter review, but cannot create demands.
 The analyzer receives every candidate batch plus at most 100 deterministically
-preselected existing demands: exact MR/Trial/document/source identities rank
+preselected existing demands: exact MR/document/source identities rank
 first, then bounded textual anchors. Its required response is one bare JSON
 object matching the supplied schema; prose and Markdown are rejected.
 
@@ -174,8 +220,9 @@ detailed section below — this list only sequences them.
    service to survive restarts — see
    [always-on service](#formal-local-operation-always-on-service).
 
-Everything is **local-only** (no cloud, accounts, or remote sync); durability is
-your filesystem plus the backups you take.
+InfoWall has no managed cloud, account system, or multi-primary synchronization.
+Run one authoritative SQLite service locally or remotely; durability is the
+selected host's filesystem plus the backups you take.
 
 ---
 
@@ -301,11 +348,10 @@ URL, API key, DB path, and backup/restore state.
 
 ## Formal local operation: data persistence & backup
 
-Infowall stores everything in a single local SQLite database. For a formal
-single-machine run, treat that file as the source of truth and back it up on a
-schedule you control. Everything here is intentionally **local-only**: there is
-no cloud sync, no remote/offsite backup service, no accounts, and no
-multi-device data model. Durability is your filesystem plus the backups you take.
+Infowall stores everything in a single SQLite database. Treat the primary's
+file as the source of truth and back it up on a schedule you control. There is
+no built-in cloud sync, offsite backup service, account system, or multi-primary
+data model. A remote deployment must transport and verify its backups explicitly.
 
 **1. Pin the DB path explicitly.** For this personal workbench, the one
 persistent path is
@@ -842,6 +888,7 @@ internal/server/     HTTP server, REST API, SSE hub, SPA static file serving
 internal/parser/     Markdown + YAML frontmatter parser (goldmark)
 internal/store/      SQLite store (mattn/go-sqlite3)
 internal/feed/       In-process pub/sub hub for SSE broadcasts
+internal/integration/ Vendor-neutral in-process integration contracts
 internal/model/      Item type and shared types
 web/                 Vite + React + TypeScript frontend
 web/src/components/renderers/  One component per content type

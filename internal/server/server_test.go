@@ -15,7 +15,7 @@ import (
 	"github.com/infowall/infowall/internal/model"
 )
 
-func TestHealthDoesNotRequireAuth(t *testing.T) {
+func TestPublicReadsAndAuthenticatedWrites(t *testing.T) {
 	srv, err := New(context.Background(), Config{
 		DBPath: filepath.Join(t.TempDir(), "infowall.db"),
 		APIKey: "secret",
@@ -55,13 +55,146 @@ func TestHealthDoesNotRequireAuth(t *testing.T) {
 		}
 	}
 
-	protectedResp, err := http.Get(httpSrv.URL + "/api/items")
+	publicResp, err := http.Get(httpSrv.URL + "/api/items")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer protectedResp.Body.Close()
-	if protectedResp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("/api/items without auth status = %d, want 401", protectedResp.StatusCode)
+	defer publicResp.Body.Close()
+	if publicResp.StatusCode != http.StatusOK {
+		t.Fatalf("/api/items without auth status = %d, want 200", publicResp.StatusCode)
+	}
+
+	checkWrite := func(auth, path string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		response := httptest.NewRecorder()
+		srv.mux.ServeHTTP(response, req)
+		return response
+	}
+	if got := checkWrite("", "/api/auth/write-check").Code; got != http.StatusUnauthorized {
+		t.Fatalf("write without auth status = %d, want 401", got)
+	}
+	if got := checkWrite("Bearer wrong", "/api/auth/write-check").Code; got != http.StatusUnauthorized {
+		t.Fatalf("write with wrong auth status = %d, want 401", got)
+	}
+	if got := checkWrite("", "/api/auth/write-check?key=secret").Code; got != http.StatusUnauthorized {
+		t.Fatalf("write with URL key status = %d, want 401", got)
+	}
+	if got := checkWrite("Bearer secret", "/api/auth/write-check").Code; got != http.StatusOK {
+		t.Fatalf("write with valid auth status = %d, want 200", got)
+	}
+
+	eventsCtx, cancelEvents := context.WithCancel(context.Background())
+	eventsReq := httptest.NewRequest(http.MethodGet, "/events", nil).WithContext(eventsCtx)
+	events := httptest.NewRecorder()
+	cancelEvents()
+	srv.mux.ServeHTTP(events, eventsReq)
+	if events.Code != http.StatusOK || !strings.Contains(events.Body.String(), ": ping") {
+		t.Fatalf("anonymous SSE response = %d %q", events.Code, events.Body.String())
+	}
+
+	createItem := func(auth string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/items", strings.NewReader("# Authorized item"))
+		req.Header.Set("Content-Type", "text/markdown")
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		response := httptest.NewRecorder()
+		srv.mux.ServeHTTP(response, req)
+		return response
+	}
+	if got := createItem("").Code; got != http.StatusUnauthorized {
+		t.Fatalf("item create without auth status = %d, want 401", got)
+	}
+	if got := createItem("Bearer wrong").Code; got != http.StatusUnauthorized {
+		t.Fatalf("item create with wrong auth status = %d, want 401", got)
+	}
+	created := createItem("Bearer secret")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("item create with valid auth status = %d, want 201: %s", created.Code, created.Body.String())
+	}
+	var item model.Item
+	if err := json.Unmarshal(created.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	readBack, err := http.Get(httpSrv.URL + "/api/items/" + item.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readBack.Body.Close()
+	if readBack.StatusCode != http.StatusOK {
+		t.Fatalf("anonymous readback status = %d, want 200", readBack.StatusCode)
+	}
+}
+
+func TestReadOnlyMirrorAllowsAuthenticatedReadsAndRejectsWrites(t *testing.T) {
+	srv, err := New(context.Background(), Config{
+		DBPath:                   filepath.Join(t.TempDir(), "mirror.db"),
+		APIKey:                   "secret",
+		ReadOnly:                 true,
+		DisableBackgroundWorkers: true,
+		InstanceRole:             "mirror",
+		BuildVersion:             "test-version",
+		BuildCommit:              "abc123",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	request := func(method, path, auth string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		response := httptest.NewRecorder()
+		srv.mux.ServeHTTP(response, req)
+		return response
+	}
+	if got := request(http.MethodGet, "/api/demands", "").Code; got != http.StatusOK {
+		t.Fatalf("read status = %d, want 200", got)
+	}
+	if got := request(http.MethodPost, "/api/auth/write-check", "Bearer secret").Code; got != http.StatusForbidden {
+		t.Fatalf("write status = %d, want 403", got)
+	}
+	capabilities := request(http.MethodGet, "/api/capabilities", "")
+	if capabilities.Code != http.StatusOK {
+		t.Fatalf("capabilities status = %d, want 200", capabilities.Code)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(capabilities.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["instance_role"] != "mirror" || payload["read_only"] != true ||
+		payload["background_workers"] != false || payload["version"] != "test-version" ||
+		payload["commit"] != "abc123" || payload["read_access"] != "public" ||
+		payload["write_auth"] != "bearer" || payload["sse_access"] != "public" {
+		t.Fatalf("unexpected capabilities: %#v", payload)
+	}
+	features, ok := payload["features"].([]any)
+	if !ok || !containsAnyString(features, "agent-spec-v12") {
+		t.Fatalf("capabilities do not advertise agent spec v12: %#v", payload)
+	}
+}
+
+func containsAnyString(values []any, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func TestInvalidInstanceRoleFails(t *testing.T) {
+	if _, err := New(context.Background(), Config{
+		DBPath: filepath.Join(t.TempDir(), "wall.db"), InstanceRole: "replica-ish",
+	}); err == nil || !strings.Contains(err.Error(), "instance role") {
+		t.Fatalf("invalid role error = %v", err)
 	}
 }
 

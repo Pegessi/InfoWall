@@ -16,7 +16,6 @@
 # Logs and local noise
 *.log
 .DS_Store
-
 # Editor / OS
 .idea/
 .vscode/

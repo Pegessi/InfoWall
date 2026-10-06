@@ -171,7 +171,22 @@ func firstMetadata(metadata map[string]string, keys ...string) string {
 func resourcesForMessage(message Message, resources []Resource) []Resource {
 	result := make([]Resource, 0)
 	for _, resource := range resources {
-		if strings.Contains(message.Content, resource.URL) {
+		matched := false
+		if len(resource.ObservationRefs) > 0 {
+			connectorID := strings.TrimSpace(message.ConnectorID)
+			if connectorID == "" {
+				connectorID = normalizedSourceKind(message)
+			}
+			for _, ref := range resource.ObservationRefs {
+				if ref.ConnectorID == connectorID && ref.ExternalID == message.ID {
+					matched = true
+					break
+				}
+			}
+		} else if strings.Contains(message.Content, resource.URL) {
+			matched = true
+		}
+		if matched {
 			result = append(result, resource)
 		}
 	}

@@ -213,6 +213,61 @@ func updateConversationWatermarksTx(ctx context.Context, tx *sql.Tx, end time.Ti
 	return nil
 }
 
+// TransientPruneResult reports non-business ingestion metadata removed by a
+// retention pass. Demands, progress, sources, reviews, projects, and feed items
+// are never part of this policy.
+type TransientPruneResult struct {
+	HookEvents    int64 `json:"hook_events"`
+	SeenMessages  int64 `json:"seen_messages"`
+	IngestionRuns int64 `json:"ingestion_runs"`
+}
+
+// PruneTransientData bounds retry tombstones and ingestion diagnostics. It is
+// safe to call repeatedly; only already-processed hook events and metadata far
+// outside the supported recovery window are eligible.
+func (s *Store) PruneTransientData(ctx context.Context, now time.Time) (TransientPruneResult, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return TransientPruneResult{}, err
+	}
+	defer tx.Rollback()
+	result, err := pruneTransientDataTx(ctx, tx, now)
+	if err != nil {
+		return TransientPruneResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return TransientPruneResult{}, err
+	}
+	return result, nil
+}
+
+func pruneTransientDataTx(ctx context.Context, tx *sql.Tx, now time.Time) (TransientPruneResult, error) {
+	var result TransientPruneResult
+	queries := []struct {
+		destination *int64
+		query       string
+		before      time.Time
+	}{
+		{&result.HookEvents, `DELETE FROM conversation_hook_events
+			WHERE processed_at IS NOT NULL AND processed_at < ?`, now.UTC().Add(-processedHookRetention)},
+		{&result.SeenMessages, `DELETE FROM feishu_ingestion_seen WHERE seen_at < ?`, now.UTC().Add(-ingestionMetadataRetention)},
+		{&result.IngestionRuns, `DELETE FROM feishu_ingestion_runs
+			WHERE finished_at IS NOT NULL AND finished_at < ?
+			AND id NOT IN (SELECT current_run_id FROM feishu_ingestion_state WHERE current_run_id <> '')`, now.UTC().Add(-ingestionMetadataRetention)},
+	}
+	for _, item := range queries {
+		execution, err := tx.ExecContext(ctx, item.query, item.before)
+		if err != nil {
+			return TransientPruneResult{}, err
+		}
+		*item.destination, err = execution.RowsAffected()
+		if err != nil {
+			return TransientPruneResult{}, err
+		}
+	}
+	return result, nil
+}
+
 func (s *Store) conversationWatermarks(ctx context.Context) (map[string]*time.Time, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT source, last_success_end FROM conversation_source_state`)
 	if err != nil {

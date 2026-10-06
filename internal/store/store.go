@@ -2,11 +2,13 @@
 package store
 
 import (
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +20,29 @@ import (
 )
 
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	path string
+}
+
+// StorageStats describes the SQLite allocation and bounded transient tables.
+type StorageStats struct {
+	SizeBytes           int64 `json:"size_bytes"`
+	WALSizeBytes        int64 `json:"wal_size_bytes"`
+	PageSizeBytes       int64 `json:"page_size_bytes"`
+	PageCount           int64 `json:"page_count"`
+	FreelistPages       int64 `json:"freelist_pages"`
+	FreelistBytes       int64 `json:"freelist_bytes"`
+	HookEvents          int64 `json:"hook_events"`
+	ProcessedHookEvents int64 `json:"processed_hook_events"`
+	SeenMessages        int64 `json:"seen_messages"`
+	IngestionRuns       int64 `json:"ingestion_runs"`
+}
+
+// CompactResult reports the bounded metadata cleanup and SQLite rewrite.
+type CompactResult struct {
+	Before StorageStats         `json:"before"`
+	Pruned TransientPruneResult `json:"pruned"`
+	After  StorageStats         `json:"after"`
 }
 
 // schemaVersion is the SQLite schema version this binary understands, tracked in
@@ -27,6 +51,20 @@ type Store struct {
 // migrating 0 -> 1 only stamps the version (no data change). Bump this and add a
 // case in migrate() when the schema changes in a future release.
 const schemaVersion = 6
+
+// SchemaVersion returns the newest database schema understood by this build.
+func SchemaVersion() int { return schemaVersion }
+
+const (
+	// Processed hook envelopes are only retry tombstones. Their bodies are
+	// cleared when committed, and a seven-day ID window is ample for delayed
+	// local hook retries without retaining an unbounded B-tree.
+	processedHookRetention = 7 * 24 * time.Hour
+	// Ingestion message IDs and run summaries only protect the bounded
+	// collection window. Thirty days is deliberately much longer than the
+	// twelve-hour recovery horizon while keeping operational history bounded.
+	ingestionMetadataRetention = 30 * 24 * time.Hour
+)
 
 const schema = `
 CREATE TABLE IF NOT EXISTS items (
@@ -268,7 +306,7 @@ func Open(path string) (*Store, error) {
 	if err := EnsureParentDir(path); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_time_format=sqlite")
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=wal_autocheckpoint(1000)&_pragma=journal_size_limit(8388608)&_time_format=sqlite")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %s: %w", path, err)
 	}
@@ -279,7 +317,7 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("open database %s: %w", path, err)
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, path: path}, nil
 }
 
 // migrate brings the database schema up to schemaVersion, tracked via
@@ -444,6 +482,127 @@ func (s *Store) Backup(ctx context.Context, outPath string) error {
 		return fmt.Errorf("backup to %s: %w", outPath, err)
 	}
 	return nil
+}
+
+// BackupGzip writes a compact SQLite snapshot as a gzip stream. The temporary
+// SQLite file is created next to the destination and removed after streaming;
+// the destination is created exclusively so an existing backup is never
+// overwritten. Compressed backups must be decompressed before restore.
+func (s *Store) BackupGzip(ctx context.Context, outPath string) (err error) {
+	if outPath == "" {
+		return errors.New("empty backup output path")
+	}
+	if _, statErr := os.Stat(outPath); statErr == nil {
+		return fmt.Errorf("backup target %s already exists (refusing to overwrite; choose a new path)", outPath)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("stat backup target %s: %w", outPath, statErr)
+	}
+	if err := EnsureParentDir(outPath); err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(outPath), ".infowall-backup-*.db")
+	if err != nil {
+		return fmt.Errorf("create temporary backup: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	if closeErr := temporary.Close(); closeErr != nil {
+		os.Remove(temporaryPath)
+		return fmt.Errorf("close temporary backup: %w", closeErr)
+	}
+	// VACUUM INTO requires a nonexistent destination.
+	if err := os.Remove(temporaryPath); err != nil {
+		return fmt.Errorf("prepare temporary backup: %w", err)
+	}
+	defer os.Remove(temporaryPath)
+	if err := s.Backup(ctx, temporaryPath); err != nil {
+		return err
+	}
+
+	source, err := os.Open(temporaryPath)
+	if err != nil {
+		return fmt.Errorf("open temporary backup: %w", err)
+	}
+	defer source.Close()
+	destination, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create compressed backup %s: %w", outPath, err)
+	}
+	complete := false
+	defer func() {
+		if closeErr := destination.Close(); err == nil && closeErr != nil {
+			err = fmt.Errorf("close compressed backup: %w", closeErr)
+		}
+		if !complete || err != nil {
+			os.Remove(outPath)
+		}
+	}()
+	zipper := gzip.NewWriter(destination)
+	if _, err = io.Copy(zipper, source); err != nil {
+		_ = zipper.Close()
+		return fmt.Errorf("compress backup: %w", err)
+	}
+	if err = zipper.Close(); err != nil {
+		return fmt.Errorf("finish compressed backup: %w", err)
+	}
+	if err = destination.Sync(); err != nil {
+		return fmt.Errorf("sync compressed backup: %w", err)
+	}
+	complete = true
+	return nil
+}
+
+// StorageStats returns allocation metrics without changing the database.
+func (s *Store) StorageStats(ctx context.Context) (StorageStats, error) {
+	var result StorageStats
+	if err := s.db.QueryRowContext(ctx, `SELECT
+		(SELECT page_size FROM pragma_page_size),
+		(SELECT page_count FROM pragma_page_count),
+		(SELECT freelist_count FROM pragma_freelist_count),
+		(SELECT count(*) FROM conversation_hook_events),
+		(SELECT count(*) FROM conversation_hook_events WHERE processed_at IS NOT NULL),
+		(SELECT count(*) FROM feishu_ingestion_seen),
+		(SELECT count(*) FROM feishu_ingestion_runs)`).Scan(
+		&result.PageSizeBytes, &result.PageCount, &result.FreelistPages,
+		&result.HookEvents, &result.ProcessedHookEvents, &result.SeenMessages,
+		&result.IngestionRuns); err != nil {
+		return StorageStats{}, fmt.Errorf("inspect database storage: %w", err)
+	}
+	result.FreelistBytes = result.PageSizeBytes * result.FreelistPages
+	if info, err := os.Stat(s.path); err == nil {
+		result.SizeBytes = info.Size()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return StorageStats{}, fmt.Errorf("stat database: %w", err)
+	}
+	if info, err := os.Stat(s.path + "-wal"); err == nil {
+		result.WALSizeBytes = info.Size()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return StorageStats{}, fmt.Errorf("stat database WAL: %w", err)
+	}
+	return result, nil
+}
+
+// Compact prunes only bounded transient ingestion metadata, rebuilds SQLite to
+// reclaim pages, and truncates the WAL. Business records are never deleted.
+func (s *Store) Compact(ctx context.Context) (CompactResult, error) {
+	before, err := s.StorageStats(ctx)
+	if err != nil {
+		return CompactResult{}, err
+	}
+	pruned, err := s.PruneTransientData(ctx, time.Now().UTC())
+	if err != nil {
+		return CompactResult{}, fmt.Errorf("prune transient data: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `VACUUM`); err != nil {
+		return CompactResult{}, fmt.Errorf("vacuum database: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		return CompactResult{}, fmt.Errorf("truncate database WAL: %w", err)
+	}
+	after, err := s.StorageStats(ctx)
+	if err != nil {
+		return CompactResult{}, err
+	}
+	return CompactResult{Before: before, Pruned: pruned, After: after}, nil
 }
 
 func (s *Store) Insert(ctx context.Context, it *model.Item) error {

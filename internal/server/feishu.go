@@ -111,6 +111,10 @@ func (s *Server) handleGetFeishuDoc(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetupFeishuDoc(w http.ResponseWriter, r *http.Request) {
+	if s.feishuClient == nil {
+		writeIntegrationUnavailable(w, "Feishu document export is not configured")
+		return
+	}
 	var request struct {
 		Create bool   `json:"create"`
 		DocURL string `json:"doc_url"`
@@ -188,6 +192,10 @@ func (s *Server) handleDisableFeishuDoc(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleSyncFeishuDoc(w http.ResponseWriter, r *http.Request) {
+	if s.syncWorker == nil {
+		writeIntegrationUnavailable(w, "Feishu document export is not configured")
+		return
+	}
 	if err := s.syncWorker.SyncNow(r.Context()); err != nil {
 		writeErr(w, http.StatusBadGateway, err)
 		return

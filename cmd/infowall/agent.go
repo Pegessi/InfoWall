@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-const agentSpecVersion = "8"
+const agentSpecVersion = "12"
 
 type agentCommandSpec struct {
 	Path        string `json:"path"`
@@ -74,16 +74,22 @@ func buildAgentSpec() agentSpec {
 		Transport: map[string]any{
 			"base_url_env":            "INFOWALL_URL",
 			"api_key_env":             "INFOWALL_API_KEY",
+			"api_key_file_env":        "INFOWALL_API_KEY_FILE",
+			"integrations_env":        "INFOWALL_INTEGRATIONS",
 			"default_base_url":        "http://localhost:8899",
 			"request_timeout_seconds": 15,
 			"success_stdout":          "JSON when --json is present",
 			"failure_stderr":          "JSON when --json is present; stdout stays empty",
+			"remote_access":           "Use the deployment's controlled HTTPS endpoint directly; set INFOWALL_URL and INFOWALL_API_KEY_FILE locally. Reads and SSE are public; mutations require the Bearer key.",
+			"read_access":             "public",
+			"write_auth":              "Authorization: Bearer <key> when the server advertises write_auth=bearer",
 		},
 		Enums: map[string][]string{
-			"default_view":    {"infowall", "workbench"},
-			"demand_status":   {"pending", "planned", "active", "waiting", "done", "dismissed"},
-			"demand_priority": {"p0", "p1", "p2", "p3", "none"},
-			"project_status":  {"active", "archived"},
+			"default_view":     {"infowall", "workbench"},
+			"integration_mode": {"builtin", "none"},
+			"demand_status":    {"pending", "planned", "active", "waiting", "done", "dismissed"},
+			"demand_priority":  {"p0", "p1", "p2", "p3", "none"},
+			"project_status":   {"active", "archived"},
 		},
 		Quality: map[string]any{
 			"progress_links": map[string]any{
@@ -128,8 +134,10 @@ func buildAgentSpec() agentSpec {
 			},
 		},
 		Commands: []agentCommandSpec{
-			{Path: "serve --default-view infowall|workbench", Writes: true, Input: "flag or INFOWALL_DEFAULT_VIEW", Output: "long-running local service", Notes: "The default applies only when the browser URL has no valid hash route."},
-			{Path: "health --json", Output: "health object", Notes: "Unauthenticated reachability check."},
+			{Path: "serve --default-view infowall|workbench --instance-role primary|mirror|development --integrations builtin|none", Writes: true, Input: "flags or environment; --api-key-file avoids placing secrets in process arguments", Output: "long-running service", Notes: "builtin is the compatibility default; none runs the standalone core with no adapters. --disable-background-workers only pauses workers and does not remove adapters. Use --read-only only for mirrors."},
+			{Path: "health --json", Output: "health object with server version, commit, API/schema versions, instance_role, and read_only", Notes: "Unauthenticated safe discovery check."},
+			{Path: "GET /api/capabilities", Output: "safe server capability document", Notes: "Unauthenticated; discover role, mutability, worker scheduling mode, and feature IDs before choosing a write endpoint. background_workers reports scheduling only, not whether adapters are composed."},
+			{Path: "POST /api/auth/write-check", Output: "write authorization result without a database mutation", Notes: "Used by doctor; requires the same Bearer credential as real writes and remains forbidden on read-only instances."},
 			{Path: "demand apply --input FILE|- --json", Writes: true, Input: "single demand, demand array, or {demands:[...]}", Output: "{created,updated,skipped,results}", Idempotency: "Stable sources[].dedupe_key; repeated input returns skipped.", Notes: "Preferred agent write path for extracted demands and progress."},
 			{Path: "demand create --title TEXT ... --json", Writes: true, Input: "flags", Output: "demand", Idempotency: "None; use demand apply for retry-safe creation."},
 			{Path: "demand list [--status STATUS] [--project ID] [--q TEXT] [--include-dismissed] --json", Output: "{demands:[...]}", Notes: "Dismissed demands are hidden unless explicitly requested."},
@@ -139,7 +147,7 @@ func buildAgentSpec() agentSpec {
 			{Path: "project create|list|update|archive ... --json", Writes: true, Input: "flags", Output: "project or {projects:[...]}"},
 			{Path: "sync feishu setup|status|now|disable ... --json", Writes: true, Input: "flags", Output: "Feishu sync state"},
 			{Path: "scan activity setup|status|now|runs|disable ... --json", Writes: true, Input: "flags; setup accepts one-time --resume-from RFC3339 for an audited prior manual scan", Output: "Unified ingestion state or run history including per-source counts, analyzer route, fallback state, and token usage", Idempotency: "Stable event/source/progress keys make overlapping windows retry-safe.", Notes: "`scan feishu` remains a compatibility alias."},
-			{Path: "hooks install|status [--json]", Writes: true, Input: "merges InfoWall lifecycle hooks into existing Codex and Claude user settings", Output: "per-source hook installation status", Idempotency: "Markers prevent duplicate hook commands and existing hooks are preserved."},
+			{Path: "hooks install|status [--bin PATH] [--server URL] [--api-key-file PATH] [--json]", Writes: true, Input: "merges or upgrades InfoWall lifecycle hooks in existing Codex and Claude user settings", Output: "per-source installed/current status for the requested binary, endpoint, and key file", Idempotency: "Existing InfoWall hooks are replaced and deduplicated; unrelated hooks are preserved."},
 			{Path: "demand review list|accept|dismiss ... --json", Writes: true, Input: "flags", Output: "ambiguous progress review(s)"},
 		},
 		Errors: map[string]any{
@@ -151,12 +159,14 @@ func buildAgentSpec() agentSpec {
 				"http_status": "integer when an HTTP response exists",
 				"hint":        "optional recovery instruction",
 			},
-			"codes":     []string{"invalid_argument", "server_unavailable", "server_timeout", "unauthorized", "not_found", "conflict", "rate_limited", "server_error", "api_error", "local_error"},
+			"codes":     []string{"invalid_argument", "server_unavailable", "server_timeout", "unauthorized", "read_only", "not_found", "conflict", "rate_limited", "server_error", "api_error", "local_error"},
 			"exit_code": 1,
 		},
 		Workflow: []string{
 			"Call `infowall agent spec --json` once per installed CLI version.",
-			"Call `infowall health --json` before a write batch.",
+			"Set INFOWALL_URL to the controlled HTTPS endpoint and INFOWALL_API_KEY_FILE to the local mode-0600 credential file.",
+			"Call `infowall doctor --json` before a write batch to verify health, role, and write authorization without changing data.",
+			"Require instance_role=primary and read_only=false before selecting a write endpoint.",
 			"Read current demands/projects before semantic reconciliation.",
 			"Gather adjacent chat context and read linked target metadata before writing a title.",
 			"Apply the demand title/content quality gate; skip candidates whose business subject is still unknown.",
@@ -194,6 +204,12 @@ func classifyCLIError(err error) cliErrorEnvelope {
 	payload := cliErrorEnvelope{OK: false, Error: err.Error(), ErrorCode: "invalid_argument"}
 	var apiErr *apiResponseError
 	if errors.As(err, &apiErr) {
+		if apiErr.StatusCode == http.StatusForbidden && strings.Contains(strings.ToLower(apiErr.Message), "read-only") {
+			payload.ErrorCode = "read_only"
+			payload.HTTPStatus = apiErr.StatusCode
+			payload.Hint = "Choose an InfoWall primary endpoint before retrying the write."
+			return payload
+		}
 		classifyHTTPStatus(&payload, apiErr.StatusCode)
 		return payload
 	}

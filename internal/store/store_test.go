@@ -1,9 +1,11 @@
 package store
 
 import (
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,6 +138,49 @@ func TestBackup(t *testing.T) {
 			t.Fatal("expected error for empty out path")
 		}
 	})
+}
+
+func TestBackupGzipRestoresSQLite(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	insertItem(t, st, "compressed")
+	out := filepath.Join(t.TempDir(), "wall.db.gz")
+	if err := st.BackupGzip(ctx, out); err != nil {
+		t.Fatal(err)
+	}
+	compressed, err := os.Open(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := gzip.NewReader(compressed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := filepath.Join(t.TempDir(), "restored.db")
+	destination, err := os.Create(restored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(destination, reader); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(restored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if count, err := reopened.Count(ctx); err != nil || count != 1 {
+		t.Fatalf("restored count = %d, err=%v", count, err)
+	}
 }
 
 func TestListPageCursorDoesNotSkipAfterNewerInsert(t *testing.T) {

@@ -32,12 +32,15 @@ import (
 	"net/http"
 	neturl "net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
 	"github.com/infowall/infowall/internal/conversationingest"
+	"github.com/infowall/infowall/internal/integration"
 	"github.com/infowall/infowall/internal/server"
 	"github.com/infowall/infowall/internal/store"
 )
@@ -119,8 +122,8 @@ func printUsage() {
 	fmt.Println(`infowall — personal information wall
 
 Usage:
-  infowall serve   [--addr :8899] [--db infowall.db] [--default-view infowall|workbench] [--dev] [--api-key KEY]
-  infowall push    [file|- ...] [-t/--topic TOPIC] [--type TYPE] [--pin] [--server URL] [--api-key KEY] [--json]
+  infowall serve   [--addr :8899] [--db infowall.db] [--default-view infowall|workbench] [--integrations builtin|none] [--dev] [--api-key KEY|--api-key-file PATH] [--instance-role ROLE]
+  infowall push    [file|- ...] [-t/--topic TOPIC] [--type TYPE] [--pin] [--server URL] [--api-key KEY|--api-key-file PATH] [--json]
   infowall list    [--limit N] [--topic TOPIC] [--type TYPE] [--server URL] [--api-key KEY] [--json]
   infowall get     <id> [--raw] [--server URL] [--api-key KEY] [--json]
   infowall export  [id ...] [--format jsonl|json] [--out PATH] [--limit N] [--topic TOPIC] [--type TYPE] [--server URL] [--api-key KEY] [--json]
@@ -130,14 +133,15 @@ Usage:
   infowall health  [--server URL] [--api-key KEY] [--json]
   infowall doctor  [--server URL] [--api-key KEY] [--json]
   infowall db info   [--db infowall.db] [--json]
-  infowall db backup --out PATH [--db infowall.db] [--json]
+  infowall db backup --out PATH [--db infowall.db] [--gzip] [--json]
+  infowall db compact [--db infowall.db] --yes [--json]
   infowall demand <apply|create|import|list|get|update|progress|dismiss|restore|review> [flags]
   infowall project <create|list|update|archive> [flags]
   infowall sync feishu <setup|status|now|disable> [flags]
   infowall scan activity <setup|status|now|runs|disable> [flags]
   infowall scan feishu <setup|status|now|runs|disable> [flags]  # compatibility alias
   infowall agent spec [--json]
-  infowall hooks <install|status> [--bin PATH] [--server URL] [--json]
+  infowall hooks <install|status> [--bin PATH] [--server URL] [--api-key-file PATH] [--json]
   infowall version
 
 Examples:
@@ -155,6 +159,7 @@ Examples:
   infowall doctor --json                      # health + auth diagnostic
   infowall db info --json                     # report local DB path/size/count
   infowall db backup --out backups/wall.db    # safe live backup (VACUUM INTO)
+  infowall db compact --db wall.db --yes       # offline transient cleanup + VACUUM
   infowall demand create --title "排查吞吐下降" --status pending --json
   infowall demand apply --input demands.json --json
   infowall demand progress DEMAND_ID --text "已收集日志" --link "https://logs.example/run/1" --json
@@ -177,34 +182,71 @@ Agent-friendly notes:
 
 // --- serve ---
 
+func integrationsForMode(mode string) (*integration.Components, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "builtin":
+		// Nil preserves the legacy compatibility composition in server.New.
+		return nil, nil
+	case "none":
+		// A non-nil empty composition selects the standalone core explicitly.
+		return &integration.Components{}, nil
+	default:
+		return nil, fmt.Errorf("invalid integrations mode %q (want builtin or none)", mode)
+	}
+}
+
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", envOr("INFOWALL_ADDR", ":8899"), "listen address")
 	db := fs.String("db", envOr("INFOWALL_DB", "infowall.db"), "SQLite database path")
 	dev := fs.Bool("dev", false, "dev mode: proxy frontend to Vite on :5173")
 	apiKey := fs.String("api-key", os.Getenv("INFOWALL_API_KEY"), "API key for write/auth")
+	apiKeyFile := fs.String("api-key-file", os.Getenv("INFOWALL_API_KEY_FILE"), "read API key from file when --api-key is unset")
 	defaultView := fs.String("default-view", envOr("INFOWALL_DEFAULT_VIEW", "workbench"), "default frontend: infowall or workbench")
+	integrationsMode := fs.String("integrations", envOr("INFOWALL_INTEGRATIONS", "builtin"), "integration composition: builtin or none")
+	disableBackgroundWorkers := fs.Bool("disable-background-workers", false, "pause automatic integration workers without removing adapters")
+	readOnly := fs.Bool("read-only", false, "reject API changes while allowing authenticated reads")
+	instanceRole := fs.String("instance-role", envOr("INFOWALL_INSTANCE_ROLE", "primary"), "instance role exposed to clients: primary, mirror, or development")
 	claudePath := fs.String("claude-path", os.Getenv("INFOWALL_CLAUDE_PATH"), "Claude Code executable (auto-detected by default)")
 	claudePresets := fs.String("claude-presets", os.Getenv("INFOWALL_CLAUDE_PRESETS"), "read-only Claude Hub env_presets.json path")
 	claudePreset := fs.String("claude-0821-preset", envOr("INFOWALL_CLAUDE_0821_PRESET", "0821"), "named local Claude 0821 environment preset")
 	fs.Parse(args)
 
-	ctx := context.Background()
+	integrations, err := integrationsForMode(*integrationsMode)
+	if err != nil {
+		return err
+	}
+	if *apiKey == "" && *apiKeyFile != "" {
+		resolved, err := readSecretFile(*apiKeyFile)
+		if err != nil {
+			return err
+		}
+		*apiKey = resolved
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	s, err := server.New(ctx, server.Config{
-		Addr:              *addr,
-		DBPath:            *db,
-		Dev:               *dev,
-		APIKey:            *apiKey,
-		DistFS:            distFS(),
-		DefaultView:       *defaultView,
-		ClaudePath:        *claudePath,
-		ClaudePresetsPath: *claudePresets,
-		ClaudePreset:      *claudePreset,
+		Addr:                     *addr,
+		DBPath:                   *db,
+		Dev:                      *dev,
+		APIKey:                   *apiKey,
+		DistFS:                   distFS(),
+		DefaultView:              *defaultView,
+		DisableBackgroundWorkers: *disableBackgroundWorkers,
+		ReadOnly:                 *readOnly,
+		InstanceRole:             *instanceRole,
+		BuildVersion:             version,
+		BuildCommit:              commit,
+		Integrations:             integrations,
+		ClaudePath:               *claudePath,
+		ClaudePresetsPath:        *claudePresets,
+		ClaudePreset:             *claudePreset,
 	})
 	if err != nil {
 		return err
 	}
-	return s.ListenAndServe()
+	defer s.Close()
+	return s.ListenAndServeContext(ctx)
 }
 
 // --- push ---
@@ -838,14 +880,24 @@ type healthResult struct {
 	ServiceStatus string `json:"service_status,omitempty"`
 	Version       string `json:"version,omitempty"`
 	Commit        string `json:"commit,omitempty"`
+	APIVersion    string `json:"api_version,omitempty"`
+	InstanceRole  string `json:"instance_role,omitempty"`
+	ReadOnly      bool   `json:"read_only"`
+	SchemaVersion int    `json:"schema_version,omitempty"`
 	TS            string `json:"ts,omitempty"`
 }
 
 type healthPayload struct {
-	OK      bool   `json:"ok"`
-	Service string `json:"service"`
-	Status  string `json:"status"`
-	TS      string `json:"ts"`
+	OK            bool   `json:"ok"`
+	Service       string `json:"service"`
+	Status        string `json:"status"`
+	Version       string `json:"version"`
+	Commit        string `json:"commit"`
+	APIVersion    string `json:"api_version"`
+	InstanceRole  string `json:"instance_role"`
+	ReadOnly      bool   `json:"read_only"`
+	SchemaVersion int    `json:"schema_version"`
+	TS            string `json:"ts"`
 }
 
 func checkHealth(cfg *clientConfig) (*healthResult, error) {
@@ -872,6 +924,13 @@ func checkHealth(cfg *clientConfig) (*healthResult, error) {
 		return nil, fmt.Errorf("health check %s reported not ok", serverURL)
 	}
 
+	serverVersion, serverCommit := payload.Version, payload.Commit
+	if serverVersion == "" {
+		serverVersion = version
+	}
+	if serverCommit == "" {
+		serverCommit = commit
+	}
 	return &healthResult{
 		OK:            true,
 		Reachable:     true,
@@ -879,8 +938,12 @@ func checkHealth(cfg *clientConfig) (*healthResult, error) {
 		HTTPStatus:    resp.StatusCode,
 		Service:       payload.Service,
 		ServiceStatus: payload.Status,
-		Version:       version,
-		Commit:        commit,
+		Version:       serverVersion,
+		Commit:        serverCommit,
+		APIVersion:    payload.APIVersion,
+		InstanceRole:  payload.InstanceRole,
+		ReadOnly:      payload.ReadOnly,
+		SchemaVersion: payload.SchemaVersion,
 		TS:            payload.TS,
 	}, nil
 }
@@ -899,7 +962,7 @@ func cmdDoctor(args []string) error {
 	if err != nil {
 		return cfg.fail(fmt.Errorf("server health: %w", err))
 	}
-	auth, err := checkAuthRead(cfg)
+	auth, err := checkWriteAuth(cfg)
 	if err != nil {
 		return cfg.fail(err)
 	}
@@ -909,8 +972,9 @@ func cmdDoctor(args []string) error {
 		Server:    strings.TrimRight(cfg.server, "/"),
 		Health:    *health,
 		Auth:      auth,
-		NextSteps: doctorNextSteps(),
+		NextSteps: doctorNextSteps(health),
 	}
+	result.WriteReady, result.WriteBlocker = writeReadiness(health)
 	if cfg.asJSON {
 		writeJSONStdout(result)
 		return nil
@@ -919,6 +983,10 @@ func cmdDoctor(args []string) error {
 	fmt.Printf("ok: %s\n", result.Server)
 	fmt.Printf("health: %s (%d)\n", health.ServiceStatus, health.HTTPStatus)
 	fmt.Printf("auth: %s (%d)\n", auth.Status, auth.HTTPStatus)
+	fmt.Printf("write ready: %v\n", result.WriteReady)
+	if result.WriteBlocker != "" {
+		fmt.Printf("write blocker: %s\n", result.WriteBlocker)
+	}
 	fmt.Println("next:")
 	for _, step := range result.NextSteps {
 		fmt.Printf("  - %s\n", step)
@@ -927,11 +995,26 @@ func cmdDoctor(args []string) error {
 }
 
 type doctorResult struct {
-	OK        bool             `json:"ok"`
-	Server    string           `json:"server"`
-	Health    healthResult     `json:"health"`
-	Auth      doctorAuthResult `json:"auth"`
-	NextSteps []string         `json:"next_steps"`
+	OK           bool             `json:"ok"`
+	Server       string           `json:"server"`
+	Health       healthResult     `json:"health"`
+	Auth         doctorAuthResult `json:"auth"`
+	WriteReady   bool             `json:"write_ready"`
+	WriteBlocker string           `json:"write_blocker,omitempty"`
+	NextSteps    []string         `json:"next_steps"`
+}
+
+func writeReadiness(health *healthResult) (bool, string) {
+	if health.ReadOnly {
+		return false, "endpoint reports read_only=true"
+	}
+	if health.InstanceRole == "primary" {
+		return true, ""
+	}
+	if health.InstanceRole == "" {
+		return false, "legacy endpoint does not advertise instance_role"
+	}
+	return false, "endpoint role is " + health.InstanceRole + ", not primary"
 }
 
 type doctorAuthResult struct {
@@ -944,15 +1027,15 @@ type doctorAuthResult struct {
 	Message        string `json:"message,omitempty"`
 }
 
-func checkAuthRead(cfg *clientConfig) (doctorAuthResult, error) {
+func checkWriteAuth(cfg *clientConfig) (doctorAuthResult, error) {
 	serverURL := strings.TrimRight(cfg.server, "/")
 	res := doctorAuthResult{
 		Checked:        true,
-		Path:           "/api/items?limit=1",
-		APIKeyProvided: cfg.apiKey != "",
+		Path:           "/api/auth/write-check",
+		APIKeyProvided: cfg.apiKey != "" || cfg.apiKeyFile != "",
 	}
 
-	resp, err := cfg.do(http.MethodGet, cfg.url(res.Path), "", nil)
+	resp, err := cfg.do(http.MethodPost, cfg.url(res.Path), "application/json", nil)
 	if err != nil {
 		res.Status = "unreachable"
 		return res, fmt.Errorf("auth check %s%s: %w", serverURL, res.Path, err)
@@ -966,11 +1049,11 @@ func checkAuthRead(cfg *clientConfig) (doctorAuthResult, error) {
 	case resp.StatusCode == http.StatusOK:
 		res.OK = true
 		res.Status = "ok"
-		res.Message = "read API accepted configured credentials"
+		res.Message = "write API accepted configured credentials without changing data"
 		return res, nil
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		res.Status = "unauthorized"
-		res.Message = "read API rejected configured credentials"
+		res.Message = "write API rejected configured credentials"
 		return res, fmt.Errorf("auth check %s%s failed: server %d unauthorized", serverURL, res.Path, resp.StatusCode)
 	case resp.StatusCode >= 300:
 		res.Status = "api_error"
@@ -982,12 +1065,18 @@ func checkAuthRead(cfg *clientConfig) (doctorAuthResult, error) {
 	}
 }
 
-func doctorNextSteps() []string {
-	return []string{
-		"Verify the local DB with `infowall db info --db <path> --json`.",
-		"Back up the local DB with `infowall db backup --db <path> --out <backup.db> --json`.",
-		"See README formal local operation sections for startup, always-on service, backup, and restore guidance.",
+func doctorNextSteps(health *healthResult) []string {
+	steps := []string{
+		"Use `infowall demand list --json` for public reads.",
+		"Use `infowall demand apply --input <file|-> --json` with stable dedupe keys for retry-safe writes.",
 	}
+	if health.ReadOnly {
+		return append([]string{"This endpoint is read-only; choose a primary endpoint before attempting demand updates."}, steps...)
+	}
+	if health.InstanceRole != "primary" {
+		return append([]string{"This endpoint is not an advertised primary; do not write until its role is verified."}, steps...)
+	}
+	return steps
 }
 
 // --- db (local SQLite persistence: info + backup) ---
@@ -997,7 +1086,7 @@ func doctorNextSteps() []string {
 // not a server is running.
 func cmdDB(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: infowall db <info|backup> [flags]")
+		return fmt.Errorf("usage: infowall db <info|backup|compact> [flags]")
 	}
 	sub := args[0]
 	rest := args[1:]
@@ -1006,32 +1095,37 @@ func cmdDB(args []string) error {
 		return cmdDBInfo(rest)
 	case "backup":
 		return cmdDBBackup(rest)
+	case "compact":
+		return cmdDBCompact(rest)
 	case "-h", "--help", "help":
 		fmt.Println(`infowall db — local SQLite persistence
 
 Usage:
   infowall db info   [--db PATH] [--json]
-  infowall db backup --out PATH [--db PATH] [--json]
+  infowall db backup --out PATH [--db PATH] [--gzip] [--json]
+  infowall db compact [--db PATH] --yes [--json]
 
-Both operate on the local database file (--db, or INFOWALL_DB, default
+All operate on the local database file (--db, or INFOWALL_DB, default
 infowall.db); they do not talk to a running server. backup uses SQLite
-VACUUM INTO, which is safe to run while the server is live.`)
+VACUUM INTO and is safe while the server is live. compact requires the server
+to be stopped and an explicit --yes confirmation.`)
 		return nil
 	default:
-		return fmt.Errorf("unknown db subcommand %q (want info or backup)", sub)
+		return fmt.Errorf("unknown db subcommand %q (want info, backup, or compact)", sub)
 	}
 }
 
 // dbInfo is the machine-readable result of `infowall db info`.
 type dbInfo struct {
-	Path        string `json:"path"`        // absolute, resolved path
-	Exists      bool   `json:"exists"`      // does the main DB file exist?
-	SizeBytes   int64  `json:"size_bytes"`  // size of the main DB file (0 if absent)
-	WAL         bool   `json:"wal"`         // is a -wal sidecar present?
-	SHM         bool   `json:"shm"`         // is a -shm sidecar present?
-	Items       int64  `json:"items"`       // row count in items table
-	Initialized bool   `json:"initialized"` // schema present / openable
-	APIKeySet   bool   `json:"api_key_set"` // is INFOWALL_API_KEY configured?
+	Path        string             `json:"path"`        // absolute, resolved path
+	Exists      bool               `json:"exists"`      // does the main DB file exist?
+	SizeBytes   int64              `json:"size_bytes"`  // size of the main DB file (0 if absent)
+	WAL         bool               `json:"wal"`         // is a -wal sidecar present?
+	SHM         bool               `json:"shm"`         // is a -shm sidecar present?
+	Items       int64              `json:"items"`       // row count in items table
+	Initialized bool               `json:"initialized"` // schema present / openable
+	APIKeySet   bool               `json:"api_key_set"` // is an API key source configured?
+	Storage     store.StorageStats `json:"storage"`
 }
 
 func cmdDBInfo(args []string) error {
@@ -1055,6 +1149,8 @@ func cmdDBInfo(args []string) error {
 	fmt.Printf("items:       %d\n", info.Items)
 	fmt.Printf("initialized: %v\n", info.Initialized)
 	fmt.Printf("api key set: %v\n", info.APIKeySet)
+	fmt.Printf("hooks:       %d (%d processed)\n", info.Storage.HookEvents, info.Storage.ProcessedHookEvents)
+	fmt.Printf("free pages:  %d (%d bytes)\n", info.Storage.FreelistPages, info.Storage.FreelistBytes)
 	return nil
 }
 
@@ -1066,7 +1162,7 @@ func collectDBInfo(dbPath string) (*dbInfo, error) {
 	if err != nil {
 		abs = dbPath
 	}
-	info := &dbInfo{Path: abs, APIKeySet: os.Getenv("INFOWALL_API_KEY") != ""}
+	info := &dbInfo{Path: abs, APIKeySet: os.Getenv("INFOWALL_API_KEY") != "" || os.Getenv("INFOWALL_API_KEY_FILE") != ""}
 
 	st, err := store.Open(dbPath)
 	if err != nil {
@@ -1080,6 +1176,10 @@ func collectDBInfo(dbPath string) (*dbInfo, error) {
 		return nil, fmt.Errorf("count items in %s: %w", abs, err)
 	}
 	info.Items = n
+	info.Storage, err = st.StorageStats(context.Background())
+	if err != nil {
+		return nil, err
+	}
 
 	if fi, err := os.Stat(dbPath); err == nil {
 		info.Exists = true
@@ -1106,6 +1206,7 @@ func cmdDBBackup(args []string) error {
 	dbPath := fs.String("db", envOr("INFOWALL_DB", "infowall.db"), "SQLite database path to back up")
 	out := fs.String("out", "", "destination path for the backup (required; must not exist)")
 	asJSON := fs.Bool("json", false, "output machine-readable JSON")
+	gzipOutput := fs.Bool("gzip", false, "write a gzip-compressed SQLite backup (restore requires decompression)")
 	parseFlags(fs, args)
 
 	if *out == "" {
@@ -1118,7 +1219,11 @@ func cmdDBBackup(args []string) error {
 	}
 	defer st.Close()
 
-	if err := st.Backup(context.Background(), *out); err != nil {
+	backup := st.Backup
+	if *gzipOutput {
+		backup = st.BackupGzip
+	}
+	if err := backup(context.Background(), *out); err != nil {
 		return failLocal(*asJSON, err)
 	}
 
@@ -1133,6 +1238,34 @@ func cmdDBBackup(args []string) error {
 		return nil
 	}
 	fmt.Printf("backed up %s → %s (%d bytes)\n", res.Source, res.Out, res.SizeBytes)
+	return nil
+}
+
+func cmdDBCompact(args []string) error {
+	fs := flag.NewFlagSet("db compact", flag.ExitOnError)
+	dbPath := fs.String("db", envOr("INFOWALL_DB", "infowall.db"), "SQLite database path to compact")
+	yes := fs.Bool("yes", false, "confirm the exclusive database rewrite")
+	asJSON := fs.Bool("json", false, "output machine-readable JSON")
+	parseFlags(fs, args)
+	if !*yes {
+		return failLocal(*asJSON, errors.New("db compact requires --yes; stop the server and take a backup first"))
+	}
+	st, err := store.Open(*dbPath)
+	if err != nil {
+		return failLocal(*asJSON, err)
+	}
+	defer st.Close()
+	result, err := st.Compact(context.Background())
+	if err != nil {
+		return failLocal(*asJSON, err)
+	}
+	if *asJSON {
+		writeJSONStdout(result)
+		return nil
+	}
+	fmt.Printf("compacted %s: %d -> %d bytes (pruned hooks=%d seen=%d runs=%d)\n",
+		*dbPath, result.Before.SizeBytes, result.After.SizeBytes, result.Pruned.HookEvents,
+		result.Pruned.SeenMessages, result.Pruned.IngestionRuns)
 	return nil
 }
 
@@ -1172,15 +1305,18 @@ func cmdHook(args []string) error {
 		cfg.url("/api/integrations/conversations/events"), bytes.NewReader(payload))
 	if err == nil {
 		req.Header.Set("Content-Type", "application/json")
-		if cfg.apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+cfg.apiKey)
+		key, keyErr := cfg.resolvedAPIKey()
+		if keyErr == nil && key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
 		}
-		response, requestErr := (&http.Client{Timeout: 750 * time.Millisecond}).Do(req)
-		if requestErr == nil {
-			io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
-			response.Body.Close()
-			if response.StatusCode >= 200 && response.StatusCode < 300 {
-				return nil
+		if keyErr == nil {
+			response, requestErr := (&http.Client{Timeout: 750 * time.Millisecond}).Do(req)
+			if requestErr == nil {
+				io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+				response.Body.Close()
+				if response.StatusCode >= 200 && response.StatusCode < 300 {
+					return nil
+				}
 			}
 		}
 	}
@@ -1190,11 +1326,12 @@ func cmdHook(args []string) error {
 
 func cmdHooks(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: infowall hooks <install|status> [--bin PATH] [--server URL] [--json]")
+		return errors.New("usage: infowall hooks <install|status> [--bin PATH] [--server URL] [--api-key-file PATH] [--json]")
 	}
 	fs := flag.NewFlagSet("hooks "+args[0], flag.ContinueOnError)
 	binPath := fs.String("bin", "", "absolute infowall binary path")
 	serverURL := fs.String("server", envOr("INFOWALL_URL", "http://localhost:8899"), "InfoWall server URL")
+	apiKeyFile := fs.String("api-key-file", os.Getenv("INFOWALL_API_KEY_FILE"), "mode-0600 API key file embedded in the hook command")
 	asJSON := fs.Bool("json", false, "output machine-readable JSON")
 	parseFlags(fs, args[1:])
 	home, err := os.UserHomeDir()
@@ -1208,12 +1345,20 @@ func cmdHooks(args []string) error {
 		}
 	}
 	*binPath, _ = filepath.Abs(*binPath)
+	if *apiKeyFile != "" {
+		*apiKeyFile, _ = filepath.Abs(*apiKeyFile)
+	}
 	paths := map[string]string{"codex": filepath.Join(home, ".codex", "hooks.json"),
 		"claude": filepath.Join(home, ".claude", "settings.json")}
 	switch args[0] {
 	case "install":
+		if *apiKeyFile != "" {
+			if _, err := readSecretFile(*apiKeyFile); err != nil {
+				return failLocal(*asJSON, err)
+			}
+		}
 		for source, path := range paths {
-			if err := installConversationHooks(path, source, *binPath, *serverURL); err != nil {
+			if err := installConversationHooks(path, source, *binPath, *serverURL, *apiKeyFile); err != nil {
 				return failLocal(*asJSON, err)
 			}
 		}
@@ -1222,13 +1367,13 @@ func cmdHooks(args []string) error {
 	default:
 		return failLocal(*asJSON, errors.New("hooks action must be install or status"))
 	}
-	status := map[string]any{"binary": *binPath, "server": *serverURL}
+	status := map[string]any{"binary": *binPath, "server": *serverURL, "api_key_file": *apiKeyFile}
 	for source, path := range paths {
-		installed, readErr := conversationHooksInstalled(path, source)
+		installed, current, readErr := conversationHooksStatus(path, source, *binPath, *serverURL, *apiKeyFile)
 		if readErr != nil {
 			return failLocal(*asJSON, readErr)
 		}
-		entry := map[string]any{"installed": installed, "path": path}
+		entry := map[string]any{"installed": installed, "current": current, "path": path}
 		if source == "codex" {
 			entry["trust_required"] = true
 			entry["trust_hint"] = "Open /hooks in Codex and trust this hook before expecting events."
@@ -1243,7 +1388,7 @@ func cmdHooks(args []string) error {
 	return nil
 }
 
-func installConversationHooks(path, source, binPath, serverURL string) error {
+func installConversationHooks(path, source, binPath, serverURL, apiKeyFile string) error {
 	root := map[string]any{}
 	if raw, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(raw, &root); err != nil {
@@ -1260,17 +1405,8 @@ func installConversationHooks(path, source, binPath, serverURL string) error {
 	for _, eventName := range []string{"UserPromptSubmit", "Stop"} {
 		entries, _ := hooks[eventName].([]any)
 		marker := "hook ingest --source " + source + " --event " + eventName
-		if jsonContainsString(entries, marker) {
-			continue
-		}
-		guard := `[ "${INFOWALL_SUMMARY_RUNNER:-}" = "1" ]`
-		command := "if " + guard + "; then cat >/dev/null 2>&1 || :; else " +
-			shellQuote(binPath) + " hook ingest --source " + source + " --event " + eventName +
-			" --server " + shellQuote(serverURL) + "; fi"
-		entries = append(entries, map[string]any{"hooks": []any{map[string]any{
-			"type": "command", "command": command, "timeout": 1,
-		}}})
-		hooks[eventName] = entries
+		command := conversationHookCommand(source, eventName, binPath, serverURL, apiKeyFile)
+		hooks[eventName] = upsertConversationHook(entries, marker, command)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -1289,19 +1425,80 @@ func installConversationHooks(path, source, binPath, serverURL string) error {
 	return os.Rename(temporary, path)
 }
 
-func conversationHooksInstalled(path, source string) (bool, error) {
+func conversationHooksStatus(path, source, binPath, serverURL, apiKeyFile string) (bool, bool, error) {
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+		return false, false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	var root map[string]any
 	if err := json.Unmarshal(raw, &root); err != nil {
-		return false, err
+		return false, false, err
 	}
-	return jsonContainsString(root["hooks"], "hook ingest --source "+source), nil
+	installed, current := true, true
+	for _, eventName := range []string{"UserPromptSubmit", "Stop"} {
+		marker := "hook ingest --source " + source + " --event " + eventName
+		desired := conversationHookCommand(source, eventName, binPath, serverURL, apiKeyFile)
+		installed = installed && countStringsContaining(root["hooks"], marker) > 0
+		current = current && countExactStrings(root["hooks"], desired) == 1 && countStringsContaining(root["hooks"], marker) == 1
+	}
+	return installed, current, nil
+}
+
+func conversationHookCommand(source, eventName, binPath, serverURL, apiKeyFile string) string {
+	guard := `[ "${INFOWALL_SUMMARY_RUNNER:-}" = "1" ]`
+	command := "if " + guard + "; then cat >/dev/null 2>&1 || :; else " +
+		shellQuote(binPath) + " hook ingest --source " + source + " --event " + eventName +
+		" --server " + shellQuote(serverURL)
+	if apiKeyFile != "" {
+		command += " --api-key-file " + shellQuote(apiKeyFile)
+	}
+	return command + "; fi"
+}
+
+func upsertConversationHook(entries []any, marker, command string) []any {
+	found := false
+	result := make([]any, 0, len(entries)+1)
+	for _, entry := range entries {
+		entryMap, ok := entry.(map[string]any)
+		if !ok {
+			result = append(result, entry)
+			continue
+		}
+		hookEntries, ok := entryMap["hooks"].([]any)
+		if !ok {
+			result = append(result, entry)
+			continue
+		}
+		filtered := make([]any, 0, len(hookEntries))
+		for _, hook := range hookEntries {
+			hookMap, ok := hook.(map[string]any)
+			existing, _ := hookMap["command"].(string)
+			if !ok || !strings.Contains(existing, marker) {
+				filtered = append(filtered, hook)
+				continue
+			}
+			if !found {
+				hookMap["type"] = "command"
+				hookMap["command"] = command
+				hookMap["timeout"] = 1
+				filtered = append(filtered, hookMap)
+				found = true
+			}
+		}
+		if len(filtered) > 0 {
+			entryMap["hooks"] = filtered
+			result = append(result, entryMap)
+		}
+	}
+	if !found {
+		result = append(result, map[string]any{"hooks": []any{map[string]any{
+			"type": "command", "command": command, "timeout": 1,
+		}}})
+	}
+	return result
 }
 
 func jsonContainsString(value any, needle string) bool {
@@ -1324,6 +1521,36 @@ func jsonContainsString(value any, needle string) bool {
 	return false
 }
 
+func countStringsContaining(value any, needle string) int {
+	return countMatchingStrings(value, func(candidate string) bool { return strings.Contains(candidate, needle) })
+}
+
+func countExactStrings(value any, expected string) int {
+	return countMatchingStrings(value, func(candidate string) bool { return candidate == expected })
+}
+
+func countMatchingStrings(value any, match func(string) bool) int {
+	switch typed := value.(type) {
+	case string:
+		if match(typed) {
+			return 1
+		}
+	case []any:
+		total := 0
+		for _, item := range typed {
+			total += countMatchingStrings(item, match)
+		}
+		return total
+	case map[string]any:
+		total := 0
+		for _, item := range typed {
+			total += countMatchingStrings(item, match)
+		}
+		return total
+	}
+	return 0
+}
+
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
@@ -1343,9 +1570,10 @@ func failLocal(asJSON bool, err error) error {
 
 // clientConfig holds the flags shared by every API-calling subcommand.
 type clientConfig struct {
-	server string
-	apiKey string
-	asJSON bool
+	server     string
+	apiKey     string
+	apiKeyFile string
+	asJSON     bool
 }
 
 // addClientFlags registers --server, --api-key, and --json on the given flag set
@@ -1354,6 +1582,7 @@ func addClientFlags(fs *flag.FlagSet) *clientConfig {
 	cfg := &clientConfig{}
 	fs.StringVar(&cfg.server, "server", envOr("INFOWALL_URL", "http://localhost:8899"), "server base URL")
 	fs.StringVar(&cfg.apiKey, "api-key", os.Getenv("INFOWALL_API_KEY"), "API key")
+	fs.StringVar(&cfg.apiKeyFile, "api-key-file", os.Getenv("INFOWALL_API_KEY_FILE"), "read API key from file when --api-key is unset")
 	fs.BoolVar(&cfg.asJSON, "json", false, "output machine-readable JSON")
 	return cfg
 }
@@ -1409,7 +1638,8 @@ func (c *clientConfig) url(path string) string {
 	return strings.TrimRight(c.server, "/") + path
 }
 
-// do issues an HTTP request with auth applied. body may be nil.
+// do issues an HTTP request. Credentials are loaded and attached only for
+// mutation methods; public reads never expose or depend on the local key file.
 func (c *clientConfig) do(method, url, contentType string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
@@ -1418,11 +1648,43 @@ func (c *clientConfig) do(method, url, contentType string, body io.Reader) (*htt
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions {
+		key, err := c.resolvedAPIKey()
+		if err != nil {
+			return nil, err
+		}
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
 	}
 	client := &http.Client{Timeout: 15 * time.Second}
 	return client.Do(req)
+}
+
+func (c *clientConfig) resolvedAPIKey() (string, error) {
+	if c.apiKey != "" || c.apiKeyFile == "" {
+		return c.apiKey, nil
+	}
+	return readSecretFile(c.apiKeyFile)
+}
+
+func readSecretFile(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("stat API key file %s: %w", path, err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return "", fmt.Errorf("API key file %s permissions are %04o; require 0600 or stricter", path, info.Mode().Perm())
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read API key file %s: %w", path, err)
+	}
+	value := strings.TrimSpace(string(raw))
+	if value == "" {
+		return "", fmt.Errorf("API key file %s is empty", path)
+	}
+	return value, nil
 }
 
 // fail emits an error in the configured format. In JSON mode it writes
