@@ -40,12 +40,12 @@ func TestLoadClaude0821ProfileUsesOnlyNamed0821Preset(t *testing.T) {
 	}
 }
 
-func TestLoadClaude0821ProfileRejectsNamedNon0821Preset(t *testing.T) {
+func TestLoadClaudePresetAcceptsNamedDay1Preset(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "env_presets.json")
 	writeClaudePresets(t, path, []claudeEnvPreset{{ID: "day1", Name: "day1", Text: "ANTHROPIC_MODEL=auto_model/alwaysday1\nANTHROPIC_AUTH_TOKEN=test-token"}})
-	_, err := loadClaude0821Profile(path, "day1")
-	if err == nil || !strings.Contains(err.Error(), "0821") {
-		t.Fatalf("expected 0821 profile rejection, got %v", err)
+	profile, err := loadClaude0821Profile(path, "day1")
+	if err != nil || profile.Route != "claude-day1" || profile.Model != "auto_model/alwaysday1" {
+		t.Fatalf("expected day1 profile, got %+v, %v", profile, err)
 	}
 }
 
@@ -104,6 +104,29 @@ printf '%s\n' '{"structured_output":{"new_demands":[],"progress_updates":[],"rev
 	}
 	if strings.Contains(text, "private final result") {
 		t.Fatalf("conversation content was embedded in the initial prompt: %s", text)
+	}
+}
+
+func TestClaudeDay1AnalyzerReportsSelectedRoute(t *testing.T) {
+	directory := t.TempDir()
+	presetsPath := filepath.Join(directory, "env_presets.json")
+	writeClaudePresets(t, presetsPath, []claudeEnvPreset{{
+		ID: "day1-id", Name: "day1",
+		Text: "export ANTHROPIC_MODEL='auto_model/alwaysday1'\nexport ANTHROPIC_AUTH_TOKEN='test-token'",
+	}})
+	script := filepath.Join(directory, "fake-claude")
+	contents := `#!/bin/sh
+printf '%s\n' '{"structured_output":{"new_demands":[],"progress_updates":[],"reviews":[],"skipped_message_ids":[],"missing_context_message_ids":["message-1"]}}'
+`
+	if err := os.WriteFile(script, []byte(contents), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	message := Message{ID: "message-1", SourceKind: "codex-conversation", Content: "result"}
+	result, err := (Claude0821Analyzer{Path: script, PresetsPath: presetsPath, Preset: "day1"}).Analyze(context.Background(), []AnalysisInput{
+		{Messages: []Message{message}, Candidates: []Message{message}},
+	})
+	if err != nil || result.AnalyzerRoute != "claude-day1" || result.AnalyzerProfileID != "day1-id" || !result.AnalyzerHealthy {
+		t.Fatalf("day1 result = %+v, %v", result, err)
 	}
 }
 

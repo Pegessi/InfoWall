@@ -19,7 +19,7 @@ import (
 )
 
 // Claude0821Analyzer starts an ephemeral, restricted Claude Code process. It
-// resolves one named local 0821 environment preset without calling or
+// resolves one named local environment preset without calling or
 // modifying Claude Hub, reusing a Hub tab, or persisting credentials.
 type Claude0821Analyzer struct {
 	Path        string
@@ -41,6 +41,7 @@ type claudeEnvPreset struct {
 type claude0821Profile struct {
 	ID          string
 	Model       string
+	Route       string
 	Fingerprint string
 	Env         map[string]string
 }
@@ -115,20 +116,20 @@ func (analyzer Claude0821Analyzer) Analyze(ctx context.Context, batches []Analys
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
-		return Result{}, fmt.Errorf("start Claude 0821 analysis: %w", err)
+		return Result{}, fmt.Errorf("start Claude analysis: %w", err)
 	}
 	done := make(chan error, 1)
 	go func() { done <- command.Wait() }()
 	select {
 	case err := <-done:
 		if err != nil {
-			return Result{}, fmt.Errorf("Claude 0821 analysis failed: %s", safeClaudeError(stderr.String(), err))
+			return Result{}, fmt.Errorf("Claude analysis failed: %s", safeClaudeError(stderr.String(), err))
 		}
 	case <-runContext.Done():
 		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
 		<-done
 		if errors.Is(runContext.Err(), context.DeadlineExceeded) {
-			return Result{}, fmt.Errorf("Claude 0821 analysis timed out after %s", timeout)
+			return Result{}, fmt.Errorf("Claude analysis timed out after %s", timeout)
 		}
 		return Result{}, runContext.Err()
 	}
@@ -143,7 +144,7 @@ func (analyzer Claude0821Analyzer) Analyze(ctx context.Context, batches []Analys
 	result.InputTokens = usage.InputTokens
 	result.CachedInputTokens = usage.CachedInputTokens
 	result.OutputTokens = usage.OutputTokens
-	result.AnalyzerRoute = "claude-0821"
+	result.AnalyzerRoute = profile.Route
 	result.AnalyzerProfileID = profile.ID
 	result.AnalyzerProfileFingerprint = profile.Fingerprint
 	result.AnalyzerHealthy = true
@@ -182,15 +183,21 @@ func loadClaude0821Profile(path, requestedPreset string) (claude0821Profile, err
 		}
 		env = filterClaudeEnvironment(env)
 		model := strings.TrimSpace(env["ANTHROPIC_MODEL"])
-		if !isClaude0821Model(model) {
-			return claude0821Profile{}, fmt.Errorf("Claude Hub environment preset %q does not select an 0821 model", preset.ID)
+		if model == "" {
+			return claude0821Profile{}, fmt.Errorf("Claude Hub environment preset %q has no model", preset.ID)
 		}
 		if !hasClaudeCredential(env) {
 			return claude0821Profile{}, fmt.Errorf("Claude Hub environment preset %q has no usable Claude credential", preset.ID)
 		}
-		return claude0821Profile{ID: preset.ID, Model: model, Fingerprint: profileFingerprint(preset.ID, env), Env: env}, nil
+		route := "claude-preset"
+		if strings.EqualFold(preset.Name, "day1") || strings.EqualFold(requestedPreset, "day1") {
+			route = "claude-day1"
+		} else if isClaude0821Model(model) {
+			route = "claude-0821"
+		}
+		return claude0821Profile{ID: preset.ID, Model: model, Route: route, Fingerprint: profileFingerprint(preset.ID, env), Env: env}, nil
 	}
-	return claude0821Profile{}, fmt.Errorf("no usable local Claude 0821 environment preset named %q", requestedPreset)
+	return claude0821Profile{}, fmt.Errorf("no usable local Claude environment preset named %q", requestedPreset)
 }
 
 func parseClaudePresetEnvironment(text string) (map[string]string, error) {
@@ -308,17 +315,17 @@ func decodeClaudeEnvelope(raw []byte) ([]byte, claudeUsage, error) {
 		IsError        bool            `json:"is_error"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return nil, claudeUsage{}, fmt.Errorf("decode Claude 0821 response: %w", err)
+		return nil, claudeUsage{}, fmt.Errorf("decode Claude response: %w", err)
 	}
 	if envelope.IsError {
-		return nil, claudeUsage{}, errors.New("Claude 0821 returned an error")
+		return nil, claudeUsage{}, errors.New("Claude returned an error")
 	}
 	result := envelope.Result
 	if len(result) == 0 || string(result) == "null" {
 		result = envelope.FallbackResult
 	}
 	if len(result) == 0 {
-		return nil, claudeUsage{}, errors.New("Claude 0821 returned no structured output")
+		return nil, claudeUsage{}, errors.New("Claude returned no structured output")
 	}
 	if result[0] == '"' {
 		var decoded string
@@ -362,7 +369,7 @@ func (analyzer FallbackAnalyzer) Analyze(ctx context.Context, batches []Analysis
 		result, err := analyzer.Primary.Analyze(ctx, batches)
 		if err == nil {
 			if result.AnalyzerRoute == "" {
-				result.AnalyzerRoute = "claude-0821"
+				result.AnalyzerRoute = "claude-preset"
 			}
 			if result.AnalyzerProfileID == "" {
 				result.AnalyzerProfileID = profileID
@@ -389,20 +396,20 @@ func (analyzer FallbackAnalyzer) Analyze(ctx context.Context, batches []Analysis
 func safeClaudeError(stderr string, fallback error) string {
 	lower := strings.ToLower(stderr)
 	for _, signal := range []struct{ contains, message string }{
-		{"authentication", "Claude 0821 authentication failed"},
-		{"not logged in", "Claude 0821 authentication failed"},
-		{"rate limit", "Claude 0821 rate limit reached"},
-		{"context window", "Claude 0821 input exceeded context window"},
-		{"too many tokens", "Claude 0821 input exceeded context window"},
-		{"unknown option", "Claude 0821 rejected an unsupported CLI option"},
-		{"invalid value", "Claude 0821 rejected an invalid CLI option value"},
-		{"allowedtools", "Claude 0821 rejected the restricted tool allowlist"},
-		{"allowed-tools", "Claude 0821 rejected the restricted tool allowlist"},
-		{"permission mode", "Claude 0821 rejected the restricted permission mode"},
-		{"mcp config", "Claude 0821 rejected the empty MCP configuration"},
-		{"model not found", "Claude 0821 model route is unavailable"},
-		{"invalid model", "Claude 0821 model route is unavailable"},
-		{"model route", "Claude 0821 model route is unavailable"},
+		{"authentication", "Claude authentication failed"},
+		{"not logged in", "Claude authentication failed"},
+		{"rate limit", "Claude rate limit reached"},
+		{"context window", "Claude input exceeded context window"},
+		{"too many tokens", "Claude input exceeded context window"},
+		{"unknown option", "Claude rejected an unsupported CLI option"},
+		{"invalid value", "Claude rejected an invalid CLI option value"},
+		{"allowedtools", "Claude rejected the restricted tool allowlist"},
+		{"allowed-tools", "Claude rejected the restricted tool allowlist"},
+		{"permission mode", "Claude rejected the restricted permission mode"},
+		{"mcp config", "Claude rejected the empty MCP configuration"},
+		{"model not found", "Claude model route is unavailable"},
+		{"invalid model", "Claude model route is unavailable"},
+		{"model route", "Claude model route is unavailable"},
 	} {
 		if strings.Contains(lower, signal.contains) {
 			return signal.message

@@ -111,7 +111,7 @@ func buildAgentSpec() agentSpec {
 				"progress":           "Append evidence/progress only; confidence >=0.90 plus exact stable match or two independent anchors.",
 				"ambiguity":          "Create a demand review when association is plausible but not unique; missing context creates nothing.",
 				"progress_dedupe":    "source-specific stable event key plus demand_id; overlap, retries, and primary/fallback races must reuse the same key",
-				"analysis_route":     "InfoWall resolves the named local 0821 environment preset in memory, starts a fresh no-session-persistence restricted Claude Code process for each run, retries once, then analyzes the same files with Codex. It never reuses a Claude Hub tab or session; Claude Hub itself is not called or modified. No new events means no analyzer call.",
+				"analysis_route":     "InfoWall resolves the named local Claude environment preset in memory (0821 by default; day1 may be selected), starts a fresh no-session-persistence restricted Claude Code process for each run, retries once, then analyzes the same files with Codex. It never reuses a Claude Hub tab or session; Claude Hub itself is not called or modified. No new events means no analyzer call.",
 				"hooks":              "UserPromptSubmit and Stop retain only user goal, final result, session/turn, cwd, and direct links; tool traces and full transcripts are excluded.",
 			},
 			"demand_title": map[string]any{

@@ -248,14 +248,14 @@ export function IngestionBar({ integration, latestRun, busy, onScan }: {
   const status = !enabled ? "未启用" : failed ? "采集失败" : running ? "采集中" : "自动采集";
   const route = latestRun?.analyzerRoute ?? integration?.analyzerRoute;
   const fallback = Boolean(latestRun?.fallbackUsed || integration?.fallbackActive);
-  const analyzerLabel = route === "codex" ? "Codex（回退）" : route === "claude-0821" || route === "claude-day1" ? "Claude 0821" : "待首次分析";
+  const analyzerLabel = route === "codex" ? "Codex（回退）" : route === "claude-0821" ? "Claude 0821" : route === "claude-day1" ? "Claude day1" : route === "claude-preset" ? "Claude 预设" : "待首次分析";
   const primaryError = latestRun?.primaryError ?? integration?.lastPrimaryError;
   const analyzerProfileId = latestRun?.analyzerProfileId ?? integration?.analyzerProfileId;
   const analyzerProfileFingerprint = latestRun?.analyzerProfileFingerprint ?? integration?.analyzerProfileFingerprint;
   const analyzerHealthy = latestRun?.analyzerHealthy ?? integration?.analyzerHealthy;
   const fallbackSummary = primaryError?.includes("invalid-json") || primaryError?.includes("strict schema")
-    ? "0821 输出格式异常，已回退 Codex"
-    : "0821 分析失败，已回退 Codex";
+    ? "Claude 输出格式异常，已回退 Codex"
+    : "Claude 分析失败，已回退 Codex";
   const hasTokenUsage = Boolean(latestRun && latestRun.inputTokens > 0);
   return (
     <section aria-label="统一进展采集" className="mb-4 rounded-xl border border-[hsl(var(--border))] bg-[hsl(var(--card))] px-3 py-3 sm:mb-6 sm:px-4">

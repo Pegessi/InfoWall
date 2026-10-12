@@ -48,6 +48,16 @@ const demand: Demand = {
 afterEach(cleanup);
 
 describe("IngestionBar", () => {
+  it("labels a successful day1 analyzer run correctly", () => {
+    const integration: FeishuChatIntegration = {
+      enabled: true, timezone: "Asia/Shanghai", activeStart: "09:00", activeEnd: "23:00",
+      intervalMinutes: 30, overlapMinutes: 5, excludedChatIds: [], status: "idle",
+      analyzerRoute: "claude-day1", analyzerHealthy: true, fallbackActive: false, sourceWatermarks: {},
+    };
+    render(<IngestionBar integration={integration} busy={false} onScan={vi.fn()} />);
+    expect(screen.getByText("Claude day1")).toBeTruthy();
+  });
+
   it("groups the run summary and keeps technical details collapsed", () => {
     const integration: FeishuChatIntegration = {
       enabled: true, timezone: "Asia/Shanghai", activeStart: "09:00", activeEnd: "23:00",
@@ -68,7 +78,7 @@ describe("IngestionBar", () => {
     expect(screen.getByText("统一进展采集")).toBeTruthy();
     expect(screen.getByText("飞书 2 · C 3 · Claude 1")).toBeTruthy();
     expect(screen.getAllByText("Codex（回退）").length).toBeGreaterThan(0);
-	const fallbackSummary = screen.getByText("0821 输出格式异常，已回退 Codex");
+	const fallbackSummary = screen.getByText("Claude 输出格式异常，已回退 Codex");
     const details = fallbackSummary.closest("details");
     expect(details?.hasAttribute("open")).toBe(false);
 

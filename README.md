@@ -170,17 +170,18 @@ preselected existing demands: exact MR/document/source identities rank
 first, then bounded textual anchors. Its required response is one bare JSON
 object matching the supplied schema; prose and Markdown are rejected.
 
-For its primary analyzer, InfoWall resolves the named local Claude environment
-preset `0821` from `~/.claude_hub/env_presets.json` into memory, then launches
+For its primary analyzer, InfoWall resolves a named local Claude environment
+preset (default `0821`) from `~/.claude_hub/env_presets.json` into memory, then launches
 a new ephemeral, no-session-persistence Claude Code process for every run. It
 never reads or reuses Claude Hub tabs or sessions, calls no Hub API, modifies
 nothing in Hub, and inspects no remote-agent transcript. Only the preset ID, a
 one-way configuration fingerprint, and health are stored; credentials remain
-process-local. If Claude 0821 fails twice, InfoWall uses the same temporary
+process-local. If the selected Claude preset fails twice, InfoWall uses the same temporary
 files with Codex and exposes the fallback plus input/cache/output token counts
 in the workbench. Override the preset source only with
-`serve --claude-presets PATH --claude-0821-preset NAME`; the default name is
-`0821`.
+`serve --claude-presets PATH --claude-preset NAME` (or the corresponding
+`INFOWALL_CLAUDE_PRESETS` and `INFOWALL_CLAUDE_PRESET` variables). The legacy
+`--claude-0821-preset` flag remains an alias; the default name is `0821`.
 
 The browser groups same-topic items into topic panels by default: links, notes,
 papers, images, and charts each get their own fixed-height panel with the

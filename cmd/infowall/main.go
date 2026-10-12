@@ -209,7 +209,9 @@ func cmdServe(args []string) error {
 	instanceRole := fs.String("instance-role", envOr("INFOWALL_INSTANCE_ROLE", "primary"), "instance role exposed to clients: primary, mirror, or development")
 	claudePath := fs.String("claude-path", os.Getenv("INFOWALL_CLAUDE_PATH"), "Claude Code executable (auto-detected by default)")
 	claudePresets := fs.String("claude-presets", os.Getenv("INFOWALL_CLAUDE_PRESETS"), "read-only Claude Hub env_presets.json path")
-	claudePreset := fs.String("claude-0821-preset", envOr("INFOWALL_CLAUDE_0821_PRESET", "0821"), "named local Claude 0821 environment preset")
+	defaultClaudePreset := envOr("INFOWALL_CLAUDE_PRESET", envOr("INFOWALL_CLAUDE_0821_PRESET", "0821"))
+	claudePreset := fs.String("claude-preset", defaultClaudePreset, "named local Claude environment preset")
+	fs.StringVar(claudePreset, "claude-0821-preset", defaultClaudePreset, "legacy alias for --claude-preset")
 	fs.Parse(args)
 
 	integrations, err := integrationsForMode(*integrationsMode)
